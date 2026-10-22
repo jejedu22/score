@@ -70,6 +70,38 @@ test('événements : création, nom unique, renommage, suppression avec ses part
   assert.equal(data.players.length, 4);                     // les joueurs sont conservés
 });
 
+test('matchs en cours : tables, joueur occupé, score saisi une seule fois', async () => {
+  const api = await start();
+  const ids = await Promise.all(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map(n => api.addPlayer(n)));
+  const [a, b, c, d, e, f, g, h] = ids;
+  const eventId = await api.addEvent('Tournoi');
+  const launch = (x, y) => api.call('POST', '/api/games', { eventId, a: x, b: y });
+
+  const t1 = (await launch([a, b], [c, d])).data.games[0];
+  assert.deepEqual([t1.table, t1.sa, t1.sb, t1.finishedAt], [1, null, null, null]);
+  const busy = await launch([a, e], [f, g]);
+  assert.equal(busy.status, 409);
+  assert.match(busy.data.error, /A joue déjà à la table 1/);
+  const t2 = (await launch([e, f], [g, h])).data.games[1];
+  assert.equal(t2.table, 2);
+
+  assert.equal((await api.call('POST', '/api/games', { eventId, a: [e, f], b: [g, h], sa: 100 })).status, 400); // un seul score
+  assert.equal((await api.call('PATCH', `/api/games/${t1.id}`, {})).status, 400);
+  const done = await api.call('PATCH', `/api/games/${t1.id}`, { sa: 1275, sb: 984 });
+  assert.equal(done.status, 200);
+  const g1 = done.data.games.find(x => x.id === t1.id);
+  assert.deepEqual([g1.sa, g1.sb, g1.table], [1280, 980, 1]);
+  assert.ok(g1.finishedAt);
+  assert.equal((await api.call('PATCH', `/api/games/${t1.id}`, { sa: 10, sb: 10 })).status, 409); // déjà saisi
+  assert.equal((await api.call('PATCH', '/api/games/ffffffffff', { sa: 10, sb: 10 })).status, 404);
+
+  // La table 1 est libérée et réattribuée ; A et B peuvent rejouer
+  assert.equal((await launch([a, c], [b, d])).data.games.at(-1).table, 1);
+  // Annuler un match en cours libère ses joueurs
+  await api.call('DELETE', `/api/games/${t2.id}`);
+  assert.equal((await launch([e, g], [f, h])).status, 200);
+});
+
 test('suppression : joueur avec parties protégé', async () => {
   const api = await start();
   const [a, b, c, d] = await fourPlayers(api);
@@ -102,6 +134,30 @@ test('migration : une base sans événements range ses parties dans « Tournoi �
   // Réouverture : la migration ne se rejoue pas
   const again = await start(openDb(file));
   assert.equal((await again.call('GET', '/api/state')).data.events.length, 1);
+});
+
+test('migration : base avec événements mais sans matchs en cours', async () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'belote-')), 'v1.db');
+  const old = new DatabaseSync(file);
+  old.exec(`
+    CREATE TABLE players (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE events (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE games (id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+      a1 TEXT NOT NULL, a2 TEXT NOT NULL, b1 TEXT NOT NULL, b2 TEXT NOT NULL,
+      sa INTEGER NOT NULL, sb INTEGER NOT NULL, created_at INTEGER NOT NULL);
+    INSERT INTO players VALUES ('aaaaaaaaaa','A',1),('bbbbbbbbbb','B',2),('cccccccccc','C',3),('dddddddddd','D',4);
+    INSERT INTO events VALUES ('eeeeeeeeee','Noël',5);
+    INSERT INTO games VALUES ('1111111111','eeeeeeeeee','aaaaaaaaaa','bbbbbbbbbb','cccccccccc','dddddddddd',100,60,7);
+  `);
+  old.close();
+  const { call } = await start(openDb(file));
+  const { data } = await call('GET', '/api/state');
+  assert.deepEqual(data.events.map(e => e.name), ['Noël']);
+  assert.deepEqual(data.games, [{ id: '1111111111', eventId: 'eeeeeeeeee', a: ['aaaaaaaaaa', 'bbbbbbbbbb'],
+    b: ['cccccccccc', 'dddddddddd'], sa: 100, sb: 60, table: null, finishedAt: 7 }]);
+  // Un match en cours peut être créé après migration
+  assert.equal((await call('POST', '/api/games', { eventId: 'eeeeeeeeee', a: ['aaaaaaaaaa', 'bbbbbbbbbb'],
+    b: ['cccccccccc', 'dddddddddd'] })).data.games[1].table, 1);
 });
 
 test('protection CSRF : écriture sans JSON refusée', async () => {
