@@ -8,7 +8,8 @@ L'application s'installe sur l'écran d'accueil (Android : « Installer l'applic
 Hors connexion, elle affiche le dernier classement chargé (lecture seule). L'installation exige HTTPS, fourni par Traefik.
 
 ## Lancer
-    node server.js            # Node >= 22.13, http://localhost:3000
+    npm start                 # Node >= 22.13, http://localhost:3000
+    npm test                  # tests de l'API (node:test, base en mémoire)
     docker compose up -d      # voir docker-compose.yml (labels Traefik)
 
 Variables : `PORT` (3000), `DB_PATH` (`./data/belote.db`, `/data/belote.db` dans l'image).

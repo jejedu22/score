@@ -1,11 +1,12 @@
 FROM node:22-alpine
 WORKDIR /app
+ENV NODE_ENV=production PORT=3000 DB_PATH=/data/belote.db
 COPY package.json server.js ./
 COPY public ./public
-ENV PORT=3000 DB_PATH=/data/belote.db
 RUN mkdir /data && chown node:node /data
 USER node
 VOLUME /data
 EXPOSE 3000
-HEALTHCHECK CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
-CMD ["node", "server.js"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
+# node:sqlite est stable dans les faits mais encore marqué expérimental : on masque l'avertissement
+CMD ["node", "--disable-warning=ExperimentalWarning", "server.js"]

@@ -42,11 +42,12 @@
   .muted { color:var(--muted); font-size:14px; }
   .game { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line); }
   .game:last-child { border:0; }
+  body.busy button { opacity:.5; pointer-events:none; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
 <body>
-<header>🃏 Score Belote <small id="status" style="color:var(--danger);font-size:13px"></small></header>
+<header>🃏 Score Belote <small id="status" role="status" style="color:var(--danger);font-size:13px"></small></header>
 <nav>
   <button data-tab="classement" class="on">Classement</button>
   <button data-tab="partie">Partie</button>
@@ -62,7 +63,7 @@ let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 // URLs relatives : fonctionne derrière Traefik, même sous un préfixe (StripPrefix)
 async function api(method, url, body) {
   const r = await fetch('api/' + url, {
-    method, headers: body ? { 'Content-Type':'application/json' } : {}, body: body && JSON.stringify(body),
+    method, headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body ?? {}),
   }).catch(() => { throw new Error('Hors ligne : modification impossible.'); });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || 'Erreur serveur');
@@ -80,8 +81,15 @@ async function refresh(force) {
     setOnline(!r.headers.get('X-Offline'));
   } catch { setOnline(false); }
 }
+// Une seule écriture à la fois : évite les doublons sur double clic
+let busy = false;
 async function act(fn) {
-  try { await fn(); await refresh(true); } catch (e) { alert(e.message); }
+  if (busy) return;
+  busy = true;
+  document.body.classList.add('busy');
+  try { await fn(); await refresh(true); }
+  catch (e) { alert(e.message); }
+  finally { busy = false; document.body.classList.remove('busy'); }
 }
 function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -98,7 +106,7 @@ function stats() {
       }
     }
   }
-  return Object.values(s).sort((x, y) => y.pts - x.pts || y.wins - x.wins || x.name.localeCompare(y.name));
+  return Object.values(s).sort((x, y) => y.pts - x.pts || y.wins - x.wins || x.name.localeCompare(y.name, 'fr'));
 }
 
 function render() {
@@ -110,9 +118,14 @@ function render() {
 function viewRanking() {
   const st = stats();
   if (!st.length) return `<div class="card muted">Ajoutez d'abord des joueurs dans l'onglet « Joueurs ».</div>`;
-  const rows = st.map((p, i) => `<tr>
-    <td><span class="rank">${i + 1}.</span> ${esc(p.name)}</td>
-    <td>${p.games}</td><td>${p.wins}</td><td class="${i === 0 && p.pts ? 'win' : ''}"><b>${p.pts}</b></td></tr>`).join('');
+  // Ex aequo (mêmes points et victoires) : même rang, le suivant est décalé (1, 2, 2, 4)
+  let rank = 0;
+  const rows = st.map((p, i) => {
+    const prev = st[i - 1];
+    if (!prev || prev.pts !== p.pts || prev.wins !== p.wins) rank = i + 1;
+    return `<tr><td><span class="rank">${rank}.</span> ${esc(p.name)}</td>
+    <td>${p.games}</td><td>${p.wins}</td><td class="${rank === 1 && p.pts ? 'win' : ''}"><b>${p.pts}</b></td></tr>`;
+  }).join('');
   const games = [...state.games].reverse().map(g => `<div class="game">
       <div><span class="${g.sa > g.sb ? 'win' : ''}">${esc(g.a.map(name).join(' & '))} <b>${g.sa}</b></span><br>
       <span class="${g.sb > g.sa ? 'win' : ''}">${esc(g.b.map(name).join(' & '))} <b>${g.sb}</b></span></div>
@@ -134,9 +147,9 @@ function viewGame() {
   return `<div class="card"><h2>Nouvelle partie</h2>
     <div class="grid2">
       <div class="team"><b>Équipe A</b>${select('a1','Joueur 1')}${select('a2','Joueur 2')}
-        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=r10(this.value);render()"></div>
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=r10(this.value);render()"></div>
       <div class="team"><b>Équipe B</b>${select('b1','Joueur 1')}${select('b2','Joueur 2')}
-        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=r10(this.value);render()"></div>
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=r10(this.value);render()"></div>
     </div>
     <p class="muted">Saisissez le score total de la partie de chaque équipe, à la fin. Il est arrondi à la dizaine (ex. 1275 → 1280).</p>
     <div class="err">${esc(draft.err)}</div>
@@ -151,6 +164,7 @@ function addGame() {
   if (![a1, a2, b1, b2].every(Boolean)) return setErr('Choisissez les 4 joueurs.');
   if (draft.sa === '' || draft.sb === '') return setErr('Saisissez les deux scores.');
   if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return setErr('Scores invalides.');
+  draft.err = '';
   act(async () => {
     await api('POST', 'games', { a:[a1, a2], b:[b1, b2], sa, sb });
     draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
@@ -159,7 +173,8 @@ function addGame() {
 }
 function setErr(m) { draft.err = m; render(); }
 function delGame(id) {
-  if (!confirm('Supprimer cette partie ?')) return;
+  const g = state.games.find(g => g.id === id);
+  if (!g || !confirm(`Supprimer la partie ${g.a.map(name).join(' & ')} ${g.sa} – ${g.sb} ${g.b.map(name).join(' & ')} ?`)) return;
   act(() => api('DELETE', 'games/' + id));
 }
 
@@ -167,7 +182,7 @@ function viewPlayers() {
   const list = state.players.map(p => `<div class="game"><span>${esc(p.name)}</span>
     <button class="ghost" onclick="delPlayer('${p.id}')">Retirer</button></div>`).join('');
   return `<div class="card"><h2>Ajouter un joueur</h2>
-    <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" autocomplete="off">
+    <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40" autocomplete="off">
     <button class="btn fit">Ajouter</button></form></div>
     <div class="card"><h2>Joueurs (${state.players.length})</h2>${list || '<span class="muted">Aucun joueur.</span>'}</div>
     <div class="card"><button class="ghost" onclick="resetAll()">Réinitialiser le tournoi</button></div>`;
@@ -191,7 +206,8 @@ document.querySelector('nav').addEventListener('click', e => {
 });
 render();
 refresh(true);
-setInterval(refresh, 5000);
+setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
