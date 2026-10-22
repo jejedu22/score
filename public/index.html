@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Score Belote</title>
+<meta name="theme-color" content="#1f6b4a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Belote">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<style>
+  :root { --bg:#f4f1ea; --card:#fff; --ink:#1d2b24; --muted:#6b7a72; --accent:#1f6b4a; --danger:#b3382c; --line:#e3ded2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121a16; --card:#1b2621; --ink:#e8efe9; --muted:#8fa196; --accent:#4cc38a; --danger:#e5746a; --line:#2b3a33; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:14px 16px; font-size:20px; font-weight:700; }
+  nav { display:flex; gap:6px; padding:0 16px 8px; }
+  nav button { flex:1; padding:10px; border:0; border-radius:10px; background:var(--card); color:var(--ink); font:inherit; font-weight:600; }
+  nav button.on { background:var(--accent); color:#fff; }
+  main { padding:0 16px 40px; max-width:640px; margin:0 auto; }
+  .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; border:1px solid var(--line); }
+  h2 { margin:0 0 10px; font-size:17px; }
+  input, select { font:inherit; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); width:100%; }
+  button.btn { padding:10px 14px; border:0; border-radius:10px; background:var(--accent); color:#fff; font:inherit; font-weight:600; }
+  button.ghost { background:transparent; color:var(--danger); border:0; font:inherit; padding:6px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  .row > .fit { flex:0 0 auto; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .team { background:var(--bg); border-radius:12px; padding:10px; display:grid; gap:8px; }
+  .team b { font-size:14px; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; }
+  td, th { padding:8px 4px; text-align:right; border-bottom:1px solid var(--line); }
+  td:first-child, th:first-child { text-align:left; }
+  th { font-size:12px; color:var(--muted); font-weight:600; }
+  .rank { color:var(--muted); width:28px; }
+  .win { color:var(--accent); font-weight:700; }
+  .muted { color:var(--muted); font-size:14px; }
+  .game { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .game:last-child { border:0; }
+  body.busy button { opacity:.5; pointer-events:none; }
+  .err { color:var(--danger); font-size:14px; min-height:18px; }
+</style>
+</head>
+<body>
+<header>🃏 Score Belote <small id="status" role="status" style="color:var(--danger);font-size:13px"></small></header>
+<nav>
+  <button data-tab="classement" class="on">Classement</button>
+  <button data-tab="partie">Partie</button>
+  <button data-tab="joueurs">Joueurs</button>
+</nav>
+<main id="app"></main>
+
+<script>
+let state = { players:[], games:[] };
+let tab = 'classement';
+let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+
+// URLs relatives : fonctionne derrière Traefik, même sous un préfixe (StripPrefix)
+async function api(method, url, body) {
+  const r = await fetch('api/' + url, {
+    method, headers: { 'Content-Type':'application/json' }, body: JSON.stringify(body ?? {}),
+  }).catch(() => { throw new Error('Hors ligne : modification impossible.'); });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'Erreur serveur');
+  return data;
+}
+async function refresh(force) {
+  try {
+    const r = await fetch('api/state');
+    if (!r.ok) throw new Error();
+    const next = await r.json();
+    const changed = JSON.stringify(next) !== JSON.stringify(state);
+    state = next;
+    const typing = ['INPUT', 'SELECT'].includes(document.activeElement?.tagName);
+    if (changed && (force || !typing)) render();
+    setOnline(!r.headers.get('X-Offline'));
+  } catch { setOnline(false); }
+}
+// Une seule écriture à la fois : évite les doublons sur double clic
+let busy = false;
+async function act(fn) {
+  if (busy) return;
+  busy = true;
+  document.body.classList.add('busy');
+  try { await fn(); await refresh(true); }
+  catch (e) { alert(e.message); }
+  finally { busy = false; document.body.classList.remove('busy'); }
+}
+function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Ordre alphabétique français (accents et majuscules ignorés : Émile entre Elsa et Félix)
+const byName = (x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' });
+const sortedPlayers = () => [...state.players].sort(byName);
+const name = id => (state.players.find(p => p.id === id) || { name:'?' }).name;
+
+function stats() {
+  const s = Object.fromEntries(state.players.map(p => [p.id, { id:p.id, name:p.name, pts:0, games:0, wins:0 }]));
+  for (const g of state.games) {
+    for (const [team, mine, theirs] of [[g.a, g.sa, g.sb], [g.b, g.sb, g.sa]]) {
+      for (const id of team) {
+        if (!s[id]) continue;
+        s[id].pts += mine; s[id].games++;
+        if (mine > theirs) s[id].wins++;
+      }
+    }
+  }
+  return Object.values(s).sort((x, y) => y.pts - x.pts || y.wins - x.wins || byName(x, y));
+}
+
+function render() {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  const app = document.getElementById('app');
+  app.innerHTML = { classement:viewRanking, partie:viewGame, joueurs:viewPlayers }[tab]();
+}
+
+function viewRanking() {
+  const st = stats();
+  if (!st.length) return `<div class="card muted">Ajoutez d'abord des joueurs dans l'onglet « Joueurs ».</div>`;
+  // Ex aequo (mêmes points et victoires) : même rang, le suivant est décalé (1, 2, 2, 4)
+  let rank = 0;
+  const rows = st.map((p, i) => {
+    const prev = st[i - 1];
+    if (!prev || prev.pts !== p.pts || prev.wins !== p.wins) rank = i + 1;
+    return `<tr><td><span class="rank">${rank}.</span> ${esc(p.name)}</td>
+    <td>${p.games}</td><td>${p.wins}</td><td class="${rank === 1 && p.pts ? 'win' : ''}"><b>${p.pts}</b></td></tr>`;
+  }).join('');
+  const games = [...state.games].reverse().map(g => `<div class="game">
+      <div><span class="${g.sa > g.sb ? 'win' : ''}">${esc(g.a.map(name).join(' & '))} <b>${g.sa}</b></span><br>
+      <span class="${g.sb > g.sa ? 'win' : ''}">${esc(g.b.map(name).join(' & '))} <b>${g.sb}</b></span></div>
+      <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div>`).join('');
+  return `<div class="card"><h2>Classement individuel</h2>
+    <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table></div>
+    <div class="card"><h2>Historique (${state.games.length})</h2>${games || '<span class="muted">Aucune partie.</span>'}</div>`;
+}
+
+function select(field, label) {
+  const taken = ['a1','a2','b1','b2'].filter(f => f !== field).map(f => draft[f]);
+  const opts = sortedPlayers().map(p =>
+    `<option value="${p.id}" ${draft[field] === p.id ? 'selected' : ''} ${taken.includes(p.id) ? 'disabled' : ''}>${esc(p.name)}</option>`).join('');
+  return `<select onchange="draft.${field}=this.value;render()" aria-label="${label}"><option value="">${label}</option>${opts}</select>`;
+}
+
+function viewGame() {
+  if (state.players.length < 4) return `<div class="card muted">Il faut au moins 4 joueurs.</div>`;
+  return `<div class="card"><h2>Nouvelle partie</h2>
+    <div class="grid2">
+      <div class="team"><b>Équipe A</b>${select('a1','Joueur 1')}${select('a2','Joueur 2')}
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=r10(this.value);render()"></div>
+      <div class="team"><b>Équipe B</b>${select('b1','Joueur 1')}${select('b2','Joueur 2')}
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=r10(this.value);render()"></div>
+    </div>
+    <p class="muted">Saisissez le score total de la partie de chaque équipe, à la fin. Il est arrondi à la dizaine (ex. 1275 → 1280).</p>
+    <div class="err">${esc(draft.err)}</div>
+    <button class="btn" onclick="addGame()">Enregistrer la partie</button></div>`;
+}
+
+const r10 = v => v === '' ? '' : String(Math.round(Number(v) / 10) * 10);
+
+function addGame() {
+  const { a1, a2, b1, b2 } = draft;
+  const sa = Number(r10(draft.sa)), sb = Number(r10(draft.sb));
+  if (![a1, a2, b1, b2].every(Boolean)) return setErr('Choisissez les 4 joueurs.');
+  if (draft.sa === '' || draft.sb === '') return setErr('Saisissez les deux scores.');
+  if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return setErr('Scores invalides.');
+  draft.err = '';
+  act(async () => {
+    await api('POST', 'games', { a:[a1, a2], b:[b1, b2], sa, sb });
+    draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+    tab = 'classement';
+  });
+}
+function setErr(m) { draft.err = m; render(); }
+function delGame(id) {
+  const g = state.games.find(g => g.id === id);
+  if (!g || !confirm(`Supprimer la partie ${g.a.map(name).join(' & ')} ${g.sa} – ${g.sb} ${g.b.map(name).join(' & ')} ?`)) return;
+  act(() => api('DELETE', 'games/' + id));
+}
+
+function viewPlayers() {
+  const list = sortedPlayers().map(p => `<div class="game"><span>${esc(p.name)}</span>
+    <button class="ghost" onclick="delPlayer('${p.id}')">Retirer</button></div>`).join('');
+  return `<div class="card"><h2>Ajouter un joueur</h2>
+    <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40" autocomplete="off">
+    <button class="btn fit">Ajouter</button></form></div>
+    <div class="card"><h2>Joueurs (${state.players.length})</h2>${list || '<span class="muted">Aucun joueur.</span>'}</div>
+    <div class="card"><button class="ghost" onclick="resetAll()">Réinitialiser le tournoi</button></div>`;
+}
+function addPlayer(e) {
+  e.preventDefault();
+  const v = document.getElementById('pname').value.trim();
+  if (!v) return;
+  act(() => api('POST', 'players', { name:v })).then(() => document.getElementById('pname')?.focus());
+}
+function delPlayer(id) {
+  act(() => api('DELETE', 'players/' + id));
+}
+function resetAll() {
+  if (!confirm('Tout effacer (joueurs et parties) ?')) return;
+  act(() => api('POST', 'reset'));
+}
+
+document.querySelector('nav').addEventListener('click', e => {
+  if (e.target.dataset.tab) { tab = e.target.dataset.tab; render(); }
+});
+render();
+refresh(true);
+setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>

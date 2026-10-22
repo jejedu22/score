@@ -1,0 +1,28 @@
+services:
+  score:
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      DB_PATH: /data/belote.db
+    volumes:
+      - score-data:/data
+    networks: [traefik]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.${ROUTER_NAME}.rule=Host(`${APP_DOMAIN}`)
+      - traefik.http.routers.${ROUTER_NAME}.entrypoints=${TRAEFIK_ENTRYPOINT}
+      - traefik.http.routers.${ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.${ROUTER_NAME}.loadbalancer.server.port=3000
+      # Optionnel : protéger l'accès avec BASIC_AUTH_USERS (voir .env.example)
+      # - traefik.http.routers.${ROUTER_NAME}.middlewares=${ROUTER_NAME}-auth
+      # - traefik.http.middlewares.${ROUTER_NAME}-auth.basicauth.users=${BASIC_AUTH_USERS}
+
+volumes:
+  score-data:
+
+networks:
+  traefik:
+    name: ${TRAEFIK_NETWORK}
+    external: true
