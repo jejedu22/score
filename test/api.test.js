@@ -102,6 +102,30 @@ test('matchs en cours : tables, joueur occupé, score saisi une seule fois', asy
   assert.equal((await launch([e, g], [f, h])).status, 200);
 });
 
+test('correction : score validé modifiable, conflit détecté', async () => {
+  const api = await start();
+  const [a, b, c, d] = await fourPlayers(api);
+  const eventId = await api.addEvent('Tournoi');
+  const g = (await api.call('POST', '/api/games', { eventId, a: [a, b], b: [c, d], sa: 1280, sb: 980 })).data.games[0];
+  const fix = body => api.call('PUT', `/api/games/${g.id}/score`, body);
+
+  const ok = await fix({ sa: 1004, sb: 1256, from: [1280, 980] });
+  assert.equal(ok.status, 200);
+  const after = ok.data.games[0];
+  assert.deepEqual([after.sa, after.sb, after.finishedAt], [1000, 1260, g.finishedAt]); // arrondi, date conservée
+  // Un autre terminal corrige à partir de l'ancien score : refusé
+  const stale = await fix({ sa: 500, sb: 500, from: [1280, 980] });
+  assert.equal(stale.status, 409);
+  assert.match(stale.data.error, /1000 – 1260/);
+  assert.equal((await fix({ sa: 500, sb: 500 })).status, 409);           // sans score de départ
+  assert.equal((await fix({ sa: 500, from: [1000, 1260] })).status, 400); // score incomplet
+  assert.equal((await api.call('PUT', '/api/games/ffffffffff/score', { sa: 1, sb: 1, from: [0, 0] })).status, 404);
+
+  // Un match en cours ne se corrige pas : il se valide
+  const t = (await api.call('POST', '/api/games', { eventId, a: [a, c], b: [b, d] })).data.games[1];
+  assert.equal((await api.call('PUT', `/api/games/${t.id}/score`, { sa: 1, sb: 1, from: [null, null] })).status, 409);
+});
+
 test('suppression : joueur avec parties protégé', async () => {
   const api = await start();
   const [a, b, c, d] = await fourPlayers(api);

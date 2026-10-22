@@ -49,7 +49,7 @@
   button.link { background:transparent; color:var(--accent); border:0; font:inherit; padding:6px; }
   .match { border-left:4px solid var(--accent); }
   .match h2 { display:flex; justify-content:space-between; align-items:center; }
-  .match .side { display:grid; grid-template-columns:1fr 110px; gap:8px; align-items:center; margin-bottom:8px; }
+  .side { display:grid; grid-template-columns:1fr 110px; gap:8px; align-items:center; margin-bottom:8px; }
   .tag { font-size:12px; font-weight:700; color:#fff; background:var(--accent); border-radius:6px; padding:2px 8px; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
@@ -72,6 +72,8 @@ let tab = 'classement';
 let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 // Scores en cours de saisie pour les matchs en cours, par id (survivent aux rafraîchissements)
 let scoreDraft = {};
+// Corrections de parties validées en cours d'édition, par id : { sa, sb, from:[sa, sb], err }
+let fix = {};
 
 // URLs relatives : fonctionne derrière Traefik, même sous un préfixe (StripPrefix)
 async function api(method, url, body) {
@@ -101,7 +103,7 @@ async function act(fn) {
   busy = true;
   document.body.classList.add('busy');
   try { await fn(); await refresh(true); }
-  catch (e) { alert(e.message); }
+  catch (e) { alert(e.message); await refresh(true); render(); }   // erreur : afficher l'état réel
   finally { busy = false; document.body.classList.remove('busy'); }
 }
 function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
@@ -140,7 +142,8 @@ function stats(games) {   // parties terminées uniquement
       }
     }
   }
-  return Object.values(s).filter(p => p.games).sort((x, y) => y.pts - x.pts || y.wins - x.wins || byName(x, y));
+  // Classement : victoires d'abord, puis points
+  return Object.values(s).filter(p => p.games).sort((x, y) => y.wins - x.wins || y.pts - x.pts || byName(x, y));
 }
 
 function render() {
@@ -168,20 +171,23 @@ function viewRanking() {
   const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
       <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">Table ${g.table}</span></div>`).join('')}</div>` : '';
   if (!st.length) return live + `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
-  // Ex aequo (mêmes points et victoires) : même rang, le suivant est décalé (1, 2, 2, 4)
+  // Ex aequo (mêmes victoires et points) : même rang, le suivant est décalé (1, 2, 2, 4)
   let rank = 0;
   const rows = st.map((p, i) => {
     const prev = st[i - 1];
-    if (!prev || prev.pts !== p.pts || prev.wins !== p.wins) rank = i + 1;
+    if (!prev || prev.wins !== p.wins || prev.pts !== p.pts) rank = i + 1;
+    const lead = rank === 1 ? 'win' : '';
     return `<tr><td><span class="rank">${rank}.</span> ${esc(p.name)}</td>
-    <td>${p.games}</td><td>${p.wins}</td><td class="${rank === 1 && p.pts ? 'win' : ''}"><b>${p.pts}</b></td></tr>`;
+    <td>${p.games}</td><td class="${lead}"><b>${p.wins}</b></td><td class="${lead}">${p.pts}</td></tr>`;
   }).join('');
-  const history = [...games].reverse().map(g => `<div class="game">
+  const history = [...games].reverse().map(g => fix[g.id] ? fixRow(g) : `<div class="game">
       <div><span class="${g.sa > g.sb ? 'win' : ''}">${teamNames(g.a)} <b>${g.sa}</b></span><br>
       <span class="${g.sb > g.sa ? 'win' : ''}">${teamNames(g.b)} <b>${g.sb}</b></span></div>
-      <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div>`).join('');
+      <div class="actions"><button class="link" onclick="startFix('${g.id}')">Corriger</button>
+      <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div></div>`).join('');
   return live + `<div class="card"><h2>Classement individuel</h2>
-    <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table></div>
+    <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table>
+    <p class="muted">Classés par victoires, puis par points.</p></div>
     <div class="card"><h2>Historique (${games.length})</h2>${history}</div>`;
 }
 
@@ -265,6 +271,34 @@ function finishGame(id) {
   act(async () => {
     await api('PATCH', 'games/' + id, scores);
     delete scoreDraft[id];
+  });
+}
+function fixRow(g) {
+  const f = fix[g.id];
+  const input = (k, team) => `<input type="number" inputmode="numeric" min="0" step="10" aria-label="Points ${team}"
+    value="${f[k]}" oninput="fix['${g.id}'].${k}=this.value" onchange="fix['${g.id}'].${k}=this.value=r10(this.value)">`;
+  return `<div class="game" style="display:block">
+    <div class="side"><span>${teamNames(g.a)}</span>${input('sa', 'équipe A')}</div>
+    <div class="side"><span>${teamNames(g.b)}</span>${input('sb', 'équipe B')}</div>
+    <div class="err">${esc(f.err ?? '')}</div>
+    <div class="row"><button class="btn" onclick="saveFix('${g.id}')">Enregistrer la correction</button>
+    <button class="link fit" onclick="delete fix['${g.id}'];render()">Annuler</button></div></div>`;
+}
+function startFix(id) {
+  const g = state.games.find(g => g.id === id);
+  if (!g) return;
+  fix[id] = { sa:String(g.sa), sb:String(g.sb), from:[g.sa, g.sb] };
+  render();
+}
+function saveFix(id) {
+  const f = fix[id];
+  const scores = checkScores(f.sa, f.sb);
+  if (!scores || typeof scores === 'string') { f.err = scores || 'Saisissez les deux scores.'; return render(); }
+  if (scores.sa === f.from[0] && scores.sb === f.from[1]) { delete fix[id]; return render(); }
+  act(async () => {
+    try { await api('PUT', `games/${id}/score`, { ...scores, from:f.from }); }
+    catch (e) { delete fix[id]; throw e; }   // score changé ailleurs : on réaffiche la valeur à jour
+    delete fix[id];
   });
 }
 function cancelGame(id) {
