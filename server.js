@@ -223,6 +223,21 @@ function createApp(db) {
       return getState();
     },
 
+    // Correction d'une partie déjà validée. `from` = score affiché lors de la correction :
+    // si un autre terminal l'a changé entre-temps, on refuse plutôt que d'écraser sa correction.
+    'PUT /api/games/:id/score': ({ params, body }) => {
+      const scores = parseScores(body);
+      if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
+      const g = db.prepare('SELECT sa, sb FROM games WHERE id = ?').get(params.id);
+      if (!g) throw new HttpError(404, 'Partie introuvable (supprimée depuis un autre appareil ?)');
+      if (g.sa === null) throw new HttpError(409, "Ce match n'est pas terminé : saisissez son score dans l'onglet Partie.");
+      const from = body.from;
+      if (!Array.isArray(from) || from[0] !== g.sa || from[1] !== g.sb)
+        throw new HttpError(409, `Le score a été modifié entre-temps (${g.sa} – ${g.sb}) : vérifiez avant de corriger.`);
+      db.prepare('UPDATE games SET sa = ?, sb = ? WHERE id = ?').run(...scores, params.id);
+      return getState();
+    },
+
     'DELETE /api/games/:id': ({ params }) => {
       db.prepare('DELETE FROM games WHERE id = ?').run(params.id);
       return getState();
