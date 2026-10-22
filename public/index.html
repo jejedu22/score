@@ -47,6 +47,10 @@
   .eventbar select { background:var(--card); font-weight:600; }
   .actions { display:flex; gap:2px; flex:0 0 auto; }
   button.link { background:transparent; color:var(--accent); border:0; font:inherit; padding:6px; }
+  .match { border-left:4px solid var(--accent); }
+  .match h2 { display:flex; justify-content:space-between; align-items:center; }
+  .match .side { display:grid; grid-template-columns:1fr 110px; gap:8px; align-items:center; margin-bottom:8px; }
+  .tag { font-size:12px; font-weight:700; color:#fff; background:var(--accent); border-radius:6px; padding:2px 8px; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
@@ -66,6 +70,8 @@ const EVENT_KEY = 'belote-evenement';
 let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
 let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+// Scores en cours de saisie pour les matchs en cours, par id (survivent aux rafraîchissements)
+let scoreDraft = {};
 
 // URLs relatives : fonctionne derrière Traefik, même sous un préfixe (StripPrefix)
 async function api(method, url, body) {
@@ -117,9 +123,13 @@ function pickEvent(id) {
   render();
 }
 const eventGames = ev => state.games.filter(g => g.eventId === ev?.id);
+const isPending = g => g.sa === null;
+const finishedGames = ev => eventGames(ev).filter(g => !isPending(g)).sort((x, y) => x.finishedAt - y.finishedAt);
+const pendingGames = ev => eventGames(ev).filter(isPending).sort((x, y) => x.table - y.table);
+const teamNames = ids => esc(ids.map(name).join(' & '));
 const fmtDate = t => new Date(t).toLocaleDateString('fr-FR', { day:'numeric', month:'short', year:'numeric' });
 
-function stats(games) {
+function stats(games) {   // parties terminées uniquement
   const s = Object.fromEntries(state.players.map(p => [p.id, { id:p.id, name:p.name, pts:0, games:0, wins:0 }]));
   for (const g of games) {
     for (const [team, mine, theirs] of [[g.a, g.sa, g.sb], [g.b, g.sb, g.sa]]) {
@@ -152,9 +162,12 @@ const noEvent = () => `<div class="card muted">Créez d'abord un événement dan
 function viewRanking() {
   const ev = currentEvent();
   if (!ev) return noEvent();
-  const games = eventGames(ev);
+  const games = finishedGames(ev);
   const st = stats(games);
-  if (!st.length) return `<div class="card muted">Aucune partie dans cet événement pour l'instant.</div>`;
+  const pending = pendingGames(ev);
+  const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
+      <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">Table ${g.table}</span></div>`).join('')}</div>` : '';
+  if (!st.length) return live + `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
   // Ex aequo (mêmes points et victoires) : même rang, le suivant est décalé (1, 2, 2, 4)
   let rank = 0;
   const rows = st.map((p, i) => {
@@ -164,50 +177,100 @@ function viewRanking() {
     <td>${p.games}</td><td>${p.wins}</td><td class="${rank === 1 && p.pts ? 'win' : ''}"><b>${p.pts}</b></td></tr>`;
   }).join('');
   const history = [...games].reverse().map(g => `<div class="game">
-      <div><span class="${g.sa > g.sb ? 'win' : ''}">${esc(g.a.map(name).join(' & '))} <b>${g.sa}</b></span><br>
-      <span class="${g.sb > g.sa ? 'win' : ''}">${esc(g.b.map(name).join(' & '))} <b>${g.sb}</b></span></div>
+      <div><span class="${g.sa > g.sb ? 'win' : ''}">${teamNames(g.a)} <b>${g.sa}</b></span><br>
+      <span class="${g.sb > g.sa ? 'win' : ''}">${teamNames(g.b)} <b>${g.sb}</b></span></div>
       <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div>`).join('');
-  return `<div class="card"><h2>Classement individuel</h2>
+  return live + `<div class="card"><h2>Classement individuel</h2>
     <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table></div>
     <div class="card"><h2>Historique (${games.length})</h2>${history}</div>`;
 }
 
-function select(field, label) {
+function select(field, label, atTable) {
   const taken = ['a1','a2','b1','b2'].filter(f => f !== field).map(f => draft[f]);
-  const opts = sortedPlayers().map(p =>
-    `<option value="${p.id}" ${draft[field] === p.id ? 'selected' : ''} ${taken.includes(p.id) ? 'disabled' : ''}>${esc(p.name)}</option>`).join('');
+  const opts = sortedPlayers().map(p => {
+    const t = atTable[p.id];
+    return `<option value="${p.id}" ${draft[field] === p.id ? 'selected' : ''} ${taken.includes(p.id) || t ? 'disabled' : ''}>${esc(p.name)}${t ? ` (table ${t})` : ''}</option>`;
+  }).join('');
   return `<select onchange="draft.${field}=this.value;render()" aria-label="${label}"><option value="">${label}</option>${opts}</select>`;
 }
 
 function viewGame() {
-  if (!currentEvent()) return noEvent();
+  const ev = currentEvent();
+  if (!ev) return noEvent();
   if (state.players.length < 4) return `<div class="card muted">Il faut au moins 4 joueurs.</div>`;
-  return `<div class="card"><h2>Nouvelle partie</h2>
+  const pending = pendingGames(ev);
+  const atTable = {};
+  for (const g of pending) for (const id of [...g.a, ...g.b]) atTable[id] = g.table;
+  const free = state.players.length - Object.keys(atTable).length;
+  const scoreInput = (g, k, team) => `<input type="number" inputmode="numeric" min="0" step="10" placeholder="Points"
+    aria-label="Points ${team} table ${g.table}" value="${scoreDraft[g.id]?.[k] ?? ''}"
+    oninput="setScoreDraft('${g.id}','${k}',this.value)" onchange="this.value=setScoreDraft('${g.id}','${k}',r10(this.value))">`;
+  const matches = pending.map(g => `<div class="card match"><h2><span>Table ${g.table}</span>
+      <button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button></h2>
+      <div class="side"><span>${teamNames(g.a)}</span>${scoreInput(g, 'sa', 'équipe A')}</div>
+      <div class="side"><span>${teamNames(g.b)}</span>${scoreInput(g, 'sb', 'équipe B')}</div>
+      <div class="err">${esc(scoreDraft[g.id]?.err ?? '')}</div>
+      <button class="btn" onclick="finishGame('${g.id}')">Valider le score</button></div>`).join('');
+  const form = free < 4
+    ? `<div class="card muted">Tous les joueurs sont à une table : saisissez un score pour en libérer.</div>`
+    : `<div class="card"><h2>Nouveau match</h2>
     <div class="grid2">
-      <div class="team"><b>Équipe A</b>${select('a1','Joueur 1')}${select('a2','Joueur 2')}
+      <div class="team"><b>Équipe A</b>${select('a1','Joueur 1',atTable)}${select('a2','Joueur 2',atTable)}
         <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=this.value=r10(this.value)"></div>
-      <div class="team"><b>Équipe B</b>${select('b1','Joueur 1')}${select('b2','Joueur 2')}
+      <div class="team"><b>Équipe B</b>${select('b1','Joueur 1',atTable)}${select('b2','Joueur 2',atTable)}
         <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=this.value=r10(this.value)"></div>
     </div>
-    <p class="muted">Saisissez le score total de la partie de chaque équipe, à la fin. Il est arrondi à la dizaine (ex. 1275 → 1280).</p>
+    <p class="muted">Laissez les scores vides pour lancer le match et saisir le score total à la fin.
+    Les scores sont arrondis à la dizaine (ex. 1275 → 1280).</p>
     <div class="err">${esc(draft.err)}</div>
-    <button class="btn" onclick="addGame()">Enregistrer la partie</button></div>`;
+    <button class="btn" onclick="addGame()">Enregistrer</button></div>`;
+  return (pending.length ? `<h2>Matchs en cours (${pending.length})</h2>` : '') + matches + form;
 }
 
 const r10 = v => v === '' ? '' : String(Math.round(Number(v) / 10) * 10);
 
+// Scores valides arrondis, null si les deux sont vides (match en cours), ou message d'erreur
+function checkScores(rawA, rawB) {
+  if (rawA === '' && rawB === '') return null;
+  if (rawA === '' || rawB === '') return 'Saisissez les deux scores.';
+  const sa = Number(r10(rawA)), sb = Number(r10(rawB));
+  if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return 'Scores invalides.';
+  return { sa, sb };
+}
+
 function addGame() {
   const { a1, a2, b1, b2 } = draft;
-  const sa = Number(r10(draft.sa)), sb = Number(r10(draft.sb));
   if (![a1, a2, b1, b2].every(Boolean)) return setErr('Choisissez les 4 joueurs.');
-  if (draft.sa === '' || draft.sb === '') return setErr('Saisissez les deux scores.');
-  if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return setErr('Scores invalides.');
+  const scores = checkScores(draft.sa, draft.sb);
+  if (typeof scores === 'string') return setErr(scores);
   draft.err = '';
   act(async () => {
-    await api('POST', 'games', { eventId:currentEvent()?.id, a:[a1, a2], b:[b1, b2], sa, sb });
+    await api('POST', 'games', { eventId:currentEvent()?.id, a:[a1, a2], b:[b1, b2], ...scores });
     draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
-    tab = 'classement';
+    if (scores) tab = 'classement';   // match lancé : on reste ici pour préparer la table suivante
   });
+}
+function setScoreDraft(id, k, v) {
+  (scoreDraft[id] ??= {})[k] = v;
+  return v;
+}
+function finishGame(id) {
+  const d = scoreDraft[id] ?? {};
+  const scores = checkScores(d.sa ?? '', d.sb ?? '');
+  if (!scores || typeof scores === 'string') {
+    d.err = scores || 'Saisissez les deux scores.';
+    scoreDraft[id] = d;
+    return render();
+  }
+  act(async () => {
+    await api('PATCH', 'games/' + id, scores);
+    delete scoreDraft[id];
+  });
+}
+function cancelGame(id) {
+  const g = state.games.find(g => g.id === id);
+  if (!g || !confirm(`Annuler le match de la table ${g.table} (${g.a.map(name).join(' & ')} contre ${g.b.map(name).join(' & ')}) ?`)) return;
+  act(async () => { await api('DELETE', 'games/' + id); delete scoreDraft[id]; });
 }
 function setErr(m) { draft.err = m; render(); }
 function delGame(id) {

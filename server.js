@@ -31,20 +31,28 @@ function openDb(dbPath) {
     event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
     a1 TEXT NOT NULL REFERENCES players(id), a2 TEXT NOT NULL REFERENCES players(id),
     b1 TEXT NOT NULL REFERENCES players(id), b2 TEXT NOT NULL REFERENCES players(id),
-    sa INTEGER NOT NULL, sb INTEGER NOT NULL, created_at INTEGER NOT NULL
+    -- Scores NULL = match en cours (équipes formées, score saisi à la fin)
+    sa INTEGER, sb INTEGER, table_no INTEGER,
+    created_at INTEGER NOT NULL, finished_at INTEGER
   );`;
   const cols = db.prepare("SELECT name FROM pragma_table_info('games')").all().map(c => c.name);
   if (!cols.length) {
     db.exec(gamesTable('games'));
-  } else if (!cols.includes('event_id')) {
-    // Migration d'une base sans événements : les parties existantes rejoignent un événement « Tournoi »
+  } else if (!cols.includes('table_no')) {
+    // Mise à niveau d'une ancienne base (reconstruction de la table, SQLite ne sait pas modifier les colonnes)
     db.exec('BEGIN');
     try {
-      const first = db.prepare('SELECT MIN(created_at) AS t FROM games').get().t;
-      const eventId = uid();
-      if (first !== null) db.prepare('INSERT INTO events (id, name, created_at) VALUES (?, ?, ?)').run(eventId, 'Tournoi', first);
+      let eventId = null;
+      if (!cols.includes('event_id')) {
+        // Base sans événements : les parties existantes rejoignent un événement « Tournoi »
+        const first = db.prepare('SELECT MIN(created_at) AS t FROM games').get().t;
+        eventId = uid();
+        if (first !== null) db.prepare('INSERT INTO events (id, name, created_at) VALUES (?, ?, ?)').run(eventId, 'Tournoi', first);
+      }
       db.exec(gamesTable('games_new'));
-      db.prepare(`INSERT INTO games_new SELECT id, ?, a1, a2, b1, b2, sa, sb, created_at FROM games`).run(eventId);
+      db.prepare(`INSERT INTO games_new (id, event_id, a1, a2, b1, b2, sa, sb, created_at, finished_at)
+        SELECT id, ${eventId ? '?' : 'event_id'}, a1, a2, b1, b2, sa, sb, created_at, created_at FROM games`)
+        .run(...(eventId ? [eventId] : []));
       db.exec('DROP TABLE games; ALTER TABLE games_new RENAME TO games; COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   }
@@ -58,6 +66,17 @@ class HttpError extends Error {
 
 const round10 = n => Math.round(n / 10) * 10;
 const isId = v => typeof v === 'string' && /^[0-9a-f]{10}$/.test(v);
+
+// Scores tous deux vides → null (match en cours) ; sinon deux scores valides arrondis à 10
+function parseScores(body) {
+  const empty = v => v === undefined || v === null || v === '';
+  if (empty(body.sa) && empty(body.sb)) return null;
+  if (empty(body.sa) || empty(body.sb)) throw new HttpError(400, 'Saisissez les deux scores');
+  const scores = [round10(Number(body.sa)), round10(Number(body.sb))];
+  if (!scores.every(n => Number.isInteger(n) && n >= 0 && n <= MAX_SCORE))
+    throw new HttpError(400, `Scores invalides (entre 0 et ${MAX_SCORE})`);
+  return scores;
+}
 
 function match(routes, method, pathname) {
   for (const [key, handler] of Object.entries(routes)) {
@@ -103,7 +122,8 @@ function createApp(db) {
     const events = db.prepare('SELECT id, name, created_at AS createdAt FROM events ORDER BY created_at, rowid').all();
     const players = db.prepare('SELECT id, name FROM players ORDER BY created_at, rowid').all();
     const games = db.prepare('SELECT * FROM games ORDER BY created_at, rowid').all()
-      .map(g => ({ id: g.id, eventId: g.event_id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb }));
+      .map(g => ({ id: g.id, eventId: g.event_id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb,
+        table: g.table_no, finishedAt: g.finished_at }));
     return { events, players, games };
   }
 
@@ -165,11 +185,41 @@ function createApp(db) {
       if (!ids.every(isId) || new Set(ids).size !== 4) throw new HttpError(400, 'Il faut 4 joueurs différents');
       const known = db.prepare(`SELECT COUNT(*) AS n FROM players WHERE id IN (${ids.map(() => '?').join()})`).get(...ids).n;
       if (known !== 4) throw new HttpError(400, 'Joueur inconnu (supprimé depuis un autre appareil ?)');
-      const sa = round10(Number(body.sa)), sb = round10(Number(body.sb));
-      if (![sa, sb].every(n => Number.isInteger(n) && n >= 0 && n <= MAX_SCORE))
-        throw new HttpError(400, `Scores invalides (entre 0 et ${MAX_SCORE})`);
-      db.prepare('INSERT INTO games (id, event_id, a1, a2, b1, b2, sa, sb, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(uid(), eventId, ...ids, sa, sb, Date.now());
+      const scores = parseScores(body);
+      const now = Date.now();
+      transaction(() => {
+        // Un joueur ne peut pas être à deux tables à la fois
+        const pending = db.prepare('SELECT * FROM games WHERE event_id = ? AND sa IS NULL').all(eventId);
+        for (const g of pending) {
+          const busy = ids.find(id => [g.a1, g.a2, g.b1, g.b2].includes(id));
+          if (busy) {
+            const who = db.prepare('SELECT name FROM players WHERE id = ?').get(busy).name;
+            throw new HttpError(409, `${who} joue déjà à la table ${g.table_no}.`);
+          }
+        }
+        // Match en cours : première table libre
+        let table = null;
+        if (!scores) {
+          const used = new Set(pending.map(g => g.table_no));
+          for (table = 1; used.has(table); table++);
+        }
+        db.prepare(`INSERT INTO games (id, event_id, a1, a2, b1, b2, sa, sb, table_no, created_at, finished_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(uid(), eventId, ...ids, scores?.[0] ?? null, scores?.[1] ?? null, table, now, scores ? now : null);
+      });
+      return getState();
+    },
+
+    'PATCH /api/games/:id': ({ params, body }) => {
+      const scores = parseScores(body);
+      if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
+      const done = db.prepare('UPDATE games SET sa = ?, sb = ?, finished_at = ? WHERE id = ? AND sa IS NULL')
+        .run(...scores, Date.now(), params.id).changes;
+      if (!done) {
+        if (!db.prepare('SELECT 1 FROM games WHERE id = ?').get(params.id))
+          throw new HttpError(404, 'Match introuvable (annulé depuis un autre appareil ?)');
+        throw new HttpError(409, 'Le score de ce match a déjà été saisi (depuis un autre appareil ?)');
+      }
       return getState();
     },
 
