@@ -19,7 +19,7 @@
   body { margin:0; font:16px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--ink); }
   header { padding:14px 16px; font-size:20px; font-weight:700; }
   nav { display:flex; gap:6px; padding:0 16px 8px; }
-  nav button { flex:1; padding:10px; border:0; border-radius:10px; background:var(--card); color:var(--ink); font:inherit; font-weight:600; }
+  nav button { flex:1; padding:10px 4px; font-size:15px !important; border:0; border-radius:10px; background:var(--card); color:var(--ink); font:inherit; font-weight:600; }
   nav button.on { background:var(--accent); color:#fff; }
   main { padding:0 16px 40px; max-width:640px; margin:0 auto; }
   .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; border:1px solid var(--line); }
@@ -43,6 +43,10 @@
   .game { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line); }
   .game:last-child { border:0; }
   body.busy button { opacity:.5; pointer-events:none; }
+  .eventbar { margin-bottom:12px; }
+  .eventbar select { background:var(--card); font-weight:600; }
+  .actions { display:flex; gap:2px; flex:0 0 auto; }
+  button.link { background:transparent; color:var(--accent); border:0; font:inherit; padding:6px; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
@@ -52,11 +56,14 @@
   <button data-tab="classement" class="on">Classement</button>
   <button data-tab="partie">Partie</button>
   <button data-tab="joueurs">Joueurs</button>
+  <button data-tab="evenements">Événements</button>
 </nav>
 <main id="app"></main>
 
 <script>
-let state = { players:[], games:[] };
+let state = { events:[], players:[], games:[] };
+const EVENT_KEY = 'belote-evenement';
+let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
 let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 
@@ -98,9 +105,23 @@ const byName = (x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base
 const sortedPlayers = () => [...state.players].sort(byName);
 const name = id => (state.players.find(p => p.id === id) || { name:'?' }).name;
 
-function stats() {
+// Événement affiché : le choix mémorisé sur cet appareil, sinon le plus récent
+const eventsRecentFirst = () => [...state.events].sort((x, y) => y.createdAt - x.createdAt);
+function currentEvent() {
+  return state.events.find(e => e.id === eventId) || eventsRecentFirst()[0] || null;
+}
+function pickEvent(id) {
+  eventId = id;
+  try { localStorage.setItem(EVENT_KEY, id); } catch {}
+  draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+  render();
+}
+const eventGames = ev => state.games.filter(g => g.eventId === ev?.id);
+const fmtDate = t => new Date(t).toLocaleDateString('fr-FR', { day:'numeric', month:'short', year:'numeric' });
+
+function stats(games) {
   const s = Object.fromEntries(state.players.map(p => [p.id, { id:p.id, name:p.name, pts:0, games:0, wins:0 }]));
-  for (const g of state.games) {
+  for (const g of games) {
     for (const [team, mine, theirs] of [[g.a, g.sa, g.sb], [g.b, g.sb, g.sa]]) {
       for (const id of team) {
         if (!s[id]) continue;
@@ -109,18 +130,31 @@ function stats() {
       }
     }
   }
-  return Object.values(s).sort((x, y) => y.pts - x.pts || y.wins - x.wins || byName(x, y));
+  return Object.values(s).filter(p => p.games).sort((x, y) => y.pts - x.pts || y.wins - x.wins || byName(x, y));
 }
 
 function render() {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   const app = document.getElementById('app');
-  app.innerHTML = { classement:viewRanking, partie:viewGame, joueurs:viewPlayers }[tab]();
+  const view = { classement:viewRanking, partie:viewGame, joueurs:viewPlayers, evenements:viewEvents }[tab]();
+  app.innerHTML = (tab === 'classement' || tab === 'partie' ? eventBar() : '') + view;
 }
 
+function eventBar() {
+  const ev = currentEvent();
+  if (!ev) return '';
+  const opts = eventsRecentFirst().map(e =>
+    `<option value="${e.id}" ${e.id === ev.id ? 'selected' : ''}>${esc(e.name)} · ${fmtDate(e.createdAt)}</option>`).join('');
+  return `<div class="eventbar"><select onchange="pickEvent(this.value)" aria-label="Événement">${opts}</select></div>`;
+}
+const noEvent = () => `<div class="card muted">Créez d'abord un événement dans l'onglet « Événements ».</div>`;
+
 function viewRanking() {
-  const st = stats();
-  if (!st.length) return `<div class="card muted">Ajoutez d'abord des joueurs dans l'onglet « Joueurs ».</div>`;
+  const ev = currentEvent();
+  if (!ev) return noEvent();
+  const games = eventGames(ev);
+  const st = stats(games);
+  if (!st.length) return `<div class="card muted">Aucune partie dans cet événement pour l'instant.</div>`;
   // Ex aequo (mêmes points et victoires) : même rang, le suivant est décalé (1, 2, 2, 4)
   let rank = 0;
   const rows = st.map((p, i) => {
@@ -129,13 +163,13 @@ function viewRanking() {
     return `<tr><td><span class="rank">${rank}.</span> ${esc(p.name)}</td>
     <td>${p.games}</td><td>${p.wins}</td><td class="${rank === 1 && p.pts ? 'win' : ''}"><b>${p.pts}</b></td></tr>`;
   }).join('');
-  const games = [...state.games].reverse().map(g => `<div class="game">
+  const history = [...games].reverse().map(g => `<div class="game">
       <div><span class="${g.sa > g.sb ? 'win' : ''}">${esc(g.a.map(name).join(' & '))} <b>${g.sa}</b></span><br>
       <span class="${g.sb > g.sa ? 'win' : ''}">${esc(g.b.map(name).join(' & '))} <b>${g.sb}</b></span></div>
       <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div>`).join('');
   return `<div class="card"><h2>Classement individuel</h2>
     <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table></div>
-    <div class="card"><h2>Historique (${state.games.length})</h2>${games || '<span class="muted">Aucune partie.</span>'}</div>`;
+    <div class="card"><h2>Historique (${games.length})</h2>${history}</div>`;
 }
 
 function select(field, label) {
@@ -146,13 +180,14 @@ function select(field, label) {
 }
 
 function viewGame() {
+  if (!currentEvent()) return noEvent();
   if (state.players.length < 4) return `<div class="card muted">Il faut au moins 4 joueurs.</div>`;
   return `<div class="card"><h2>Nouvelle partie</h2>
     <div class="grid2">
       <div class="team"><b>Équipe A</b>${select('a1','Joueur 1')}${select('a2','Joueur 2')}
-        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=r10(this.value);render()"></div>
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=this.value=r10(this.value)"></div>
       <div class="team"><b>Équipe B</b>${select('b1','Joueur 1')}${select('b2','Joueur 2')}
-        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=r10(this.value);render()"></div>
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=this.value=r10(this.value)"></div>
     </div>
     <p class="muted">Saisissez le score total de la partie de chaque équipe, à la fin. Il est arrondi à la dizaine (ex. 1275 → 1280).</p>
     <div class="err">${esc(draft.err)}</div>
@@ -169,7 +204,7 @@ function addGame() {
   if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return setErr('Scores invalides.');
   draft.err = '';
   act(async () => {
-    await api('POST', 'games', { a:[a1, a2], b:[b1, b2], sa, sb });
+    await api('POST', 'games', { eventId:currentEvent()?.id, a:[a1, a2], b:[b1, b2], sa, sb });
     draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
     tab = 'classement';
   });
@@ -187,8 +222,8 @@ function viewPlayers() {
   return `<div class="card"><h2>Ajouter un joueur</h2>
     <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40" autocomplete="off">
     <button class="btn fit">Ajouter</button></form></div>
-    <div class="card"><h2>Joueurs (${state.players.length})</h2>${list || '<span class="muted">Aucun joueur.</span>'}</div>
-    <div class="card"><button class="ghost" onclick="resetAll()">Réinitialiser le tournoi</button></div>`;
+    <div class="card"><h2>Joueurs (${state.players.length})</h2>${list || '<span class="muted">Aucun joueur.</span>'}
+    <p class="muted">Les joueurs sont communs à tous les événements.</p></div>`;
 }
 function addPlayer(e) {
   e.preventDefault();
@@ -199,9 +234,45 @@ function addPlayer(e) {
 function delPlayer(id) {
   act(() => api('DELETE', 'players/' + id));
 }
-function resetAll() {
-  if (!confirm('Tout effacer (joueurs et parties) ?')) return;
-  act(() => api('POST', 'reset'));
+function viewEvents() {
+  const cur = currentEvent();
+  const list = eventsRecentFirst().map(e => {
+    const n = eventGames(e).length;
+    return `<div class="game"><div><b>${esc(e.name)}</b>${e.id === cur?.id ? ' <span class="win">✓</span>' : ''}<br>
+      <span class="muted" style="white-space:nowrap">${fmtDate(e.createdAt)} · ${n} partie${n > 1 ? 's' : ''}</span></div>
+      <div class="actions">
+        ${e.id === cur?.id ? '' : `<button class="link" onclick="openEvent('${e.id}')">Ouvrir</button>`}
+        <button class="link" onclick="renameEvent('${e.id}')">Renommer</button>
+        <button class="ghost" onclick="delEvent('${e.id}')">Suppr.</button>
+      </div></div>`;
+  }).join('');
+  return `<div class="card"><h2>Nouvel événement</h2>
+    <form class="row" onsubmit="addEvent(event)"><input id="ename" placeholder="Ex. Tournoi de Noël" aria-label="Nom de l'événement" maxlength="40" autocomplete="off">
+    <button class="btn fit">Créer</button></form></div>
+    <div class="card"><h2>Événements (${state.events.length})</h2>${list || '<span class="muted">Aucun événement.</span>'}</div>`;
+}
+function addEvent(e) {
+  e.preventDefault();
+  const v = document.getElementById('ename').value.trim();
+  if (!v) return;
+  act(async () => {
+    const { created } = await api('POST', 'events', { name:v });
+    pickEvent(created);
+    tab = 'classement';
+  });
+}
+function openEvent(id) { pickEvent(id); tab = 'classement'; render(); }
+function renameEvent(id) {
+  const ev = state.events.find(e => e.id === id);
+  const v = ev && prompt("Nouveau nom de l'événement :", ev.name);
+  if (v && v.trim() && v.trim() !== ev.name) act(() => api('PATCH', 'events/' + id, { name:v.trim() }));
+}
+function delEvent(id) {
+  const ev = state.events.find(e => e.id === id);
+  const n = eventGames(ev).length;
+  const what = n === 0 ? '' : n === 1 ? ' et sa partie' : ` et ses ${n} parties`;
+  if (!ev || !confirm(`Supprimer « ${ev.name} »${what} ? Cette action est définitive.`)) return;
+  act(() => api('DELETE', 'events/' + id));
 }
 
 document.querySelector('nav').addEventListener('click', e => {

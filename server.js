@@ -9,6 +9,9 @@ const PUBLIC = path.join(__dirname, 'public');
 const MAX_SCORE = 100_000;
 const MAX_NAME = 40;
 
+const uid = () => crypto.randomBytes(5).toString('hex');
+const cleanName = v => String(v ?? '').trim().replace(/\s+/g, ' ').slice(0, MAX_NAME);
+
 function openDb(dbPath) {
   if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
@@ -18,17 +21,36 @@ function openDb(dbPath) {
   CREATE TABLE IF NOT EXISTS players (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL
   );
-  CREATE TABLE IF NOT EXISTS games (
+  CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL
+  );
+  `);
+  const gamesTable = name => `
+  CREATE TABLE ${name} (
     id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
     a1 TEXT NOT NULL REFERENCES players(id), a2 TEXT NOT NULL REFERENCES players(id),
     b1 TEXT NOT NULL REFERENCES players(id), b2 TEXT NOT NULL REFERENCES players(id),
     sa INTEGER NOT NULL, sb INTEGER NOT NULL, created_at INTEGER NOT NULL
-  );
-  `);
+  );`;
+  const cols = db.prepare("SELECT name FROM pragma_table_info('games')").all().map(c => c.name);
+  if (!cols.length) {
+    db.exec(gamesTable('games'));
+  } else if (!cols.includes('event_id')) {
+    // Migration d'une base sans événements : les parties existantes rejoignent un événement « Tournoi »
+    db.exec('BEGIN');
+    try {
+      const first = db.prepare('SELECT MIN(created_at) AS t FROM games').get().t;
+      const eventId = uid();
+      if (first !== null) db.prepare('INSERT INTO events (id, name, created_at) VALUES (?, ?, ?)').run(eventId, 'Tournoi', first);
+      db.exec(gamesTable('games_new'));
+      db.prepare(`INSERT INTO games_new SELECT id, ?, a1, a2, b1, b2, sa, sb, created_at FROM games`).run(eventId);
+      db.exec('DROP TABLE games; ALTER TABLE games_new RENAME TO games; COMMIT');
+    } catch (e) { db.exec('ROLLBACK'); throw e; }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS games_event ON games(event_id)');
   return db;
 }
-
-const uid = () => crypto.randomBytes(5).toString('hex');
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -76,18 +98,49 @@ function createApp(db) {
     catch (e) { db.exec('ROLLBACK'); throw e; }
   };
 
+  // Les joueurs sont communs à tous les événements ; chaque partie appartient à un événement.
   function getState() {
+    const events = db.prepare('SELECT id, name, created_at AS createdAt FROM events ORDER BY created_at, rowid').all();
     const players = db.prepare('SELECT id, name FROM players ORDER BY created_at, rowid').all();
     const games = db.prepare('SELECT * FROM games ORDER BY created_at, rowid').all()
-      .map(g => ({ id: g.id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb }));
-    return { players, games };
+      .map(g => ({ id: g.id, eventId: g.event_id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb }));
+    return { events, players, games };
   }
+
+  const eventName = (body, exceptId = '') => {
+    const name = cleanName(body.name);
+    if (!name) throw new HttpError(400, 'Nom requis');
+    if (db.prepare('SELECT 1 FROM events WHERE name = ? COLLATE NOCASE AND id != ?').get(name, exceptId))
+      throw new HttpError(409, `L'événement « ${name} » existe déjà.`);
+    return name;
+  };
 
   const routes = {
     'GET /api/state': () => getState(),
 
+    'POST /api/events': ({ body }) => {
+      const id = uid();
+      db.prepare('INSERT INTO events (id, name, created_at) VALUES (?, ?, ?)').run(id, eventName(body), Date.now());
+      return { ...getState(), created: id };
+    },
+
+    'PATCH /api/events/:id': ({ params, body }) => {
+      const name = eventName(body, params.id);
+      if (!db.prepare('UPDATE events SET name = ? WHERE id = ?').run(name, params.id).changes)
+        throw new HttpError(404, 'Événement introuvable');
+      return getState();
+    },
+
+    'DELETE /api/events/:id': ({ params }) => {
+      transaction(() => {
+        db.prepare('DELETE FROM games WHERE event_id = ?').run(params.id);
+        db.prepare('DELETE FROM events WHERE id = ?').run(params.id);
+      });
+      return getState();
+    },
+
     'POST /api/players': ({ body }) => {
-      const name = String(body.name ?? '').trim().replace(/\s+/g, ' ').slice(0, MAX_NAME);
+      const name = cleanName(body.name);
       if (!name) throw new HttpError(400, 'Nom requis');
       if (db.prepare('SELECT 1 FROM players WHERE name = ? COLLATE NOCASE').get(name))
         throw new HttpError(409, `« ${name} » existe déjà.`);
@@ -97,13 +150,15 @@ function createApp(db) {
 
     'DELETE /api/players/:id': ({ params }) => {
       const used = db.prepare('SELECT 1 FROM games WHERE ? IN (a1, a2, b1, b2) LIMIT 1').get(params.id);
-      if (used) throw new HttpError(409, "Ce joueur a déjà des parties enregistrées : supprimez-les d'abord.");
+      if (used) throw new HttpError(409, "Ce joueur a des parties enregistrées dans un événement : supprimez-les d'abord.");
       db.prepare('DELETE FROM players WHERE id = ?').run(params.id);
       return getState();
     },
 
     'POST /api/games': ({ body }) => {
-      const { a, b } = body;
+      const { a, b, eventId } = body;
+      if (!isId(eventId) || !db.prepare('SELECT 1 FROM events WHERE id = ?').get(eventId))
+        throw new HttpError(400, 'Événement introuvable (supprimé depuis un autre appareil ?)');
       if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 2 || b.length !== 2)
         throw new HttpError(400, 'Il faut 2 joueurs par équipe');
       const ids = [...a, ...b];
@@ -113,18 +168,13 @@ function createApp(db) {
       const sa = round10(Number(body.sa)), sb = round10(Number(body.sb));
       if (![sa, sb].every(n => Number.isInteger(n) && n >= 0 && n <= MAX_SCORE))
         throw new HttpError(400, `Scores invalides (entre 0 et ${MAX_SCORE})`);
-      db.prepare('INSERT INTO games (id, a1, a2, b1, b2, sa, sb, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(uid(), ...ids, sa, sb, Date.now());
+      db.prepare('INSERT INTO games (id, event_id, a1, a2, b1, b2, sa, sb, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(uid(), eventId, ...ids, sa, sb, Date.now());
       return getState();
     },
 
     'DELETE /api/games/:id': ({ params }) => {
       db.prepare('DELETE FROM games WHERE id = ?').run(params.id);
-      return getState();
-    },
-
-    'POST /api/reset': () => {
-      transaction(() => db.exec('DELETE FROM games; DELETE FROM players;'));
       return getState();
     },
   };
