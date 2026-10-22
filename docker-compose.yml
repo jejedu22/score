@@ -1,0 +1,24 @@
+services:
+  score:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - score-data:/data
+    networks: [traefik]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik
+      - traefik.http.routers.score.rule=Host(`belote.example.com`)
+      - traefik.http.routers.score.entrypoints=websecure
+      - traefik.http.routers.score.tls.certresolver=letsencrypt
+      - traefik.http.services.score.loadbalancer.server.port=3000
+      # Optionnel : protéger l'accès (htpasswd -nb user pass, $ doublés dans compose)
+      # - traefik.http.routers.score.middlewares=score-auth
+      # - traefik.http.middlewares.score-auth.basicauth.users=user:$$apr1$$...
+
+volumes:
+  score-data:
+
+networks:
+  traefik:
+    external: true   # nom du réseau Docker partagé avec Traefik

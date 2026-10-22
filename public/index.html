@@ -40,7 +40,7 @@
 </style>
 </head>
 <body>
-<header>🃏 Score Belote</header>
+<header>🃏 Score Belote <small id="status" style="color:var(--danger);font-size:13px"></small></header>
 <nav>
   <button data-tab="classement" class="on">Classement</button>
   <button data-tab="partie">Partie</button>
@@ -49,17 +49,33 @@
 <main id="app"></main>
 
 <script>
-const KEY = 'belote-tournoi-v1';
-let state = load();
+let state = { players:[], games:[] };
 let tab = 'classement';
 let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 
-function load() {
-  try { return JSON.parse(localStorage.getItem(KEY)) || { players:[], games:[] }; }
-  catch { return { players:[], games:[] }; }
+// URLs relatives : fonctionne derrière Traefik, même sous un préfixe (StripPrefix)
+async function api(method, url, body) {
+  const r = await fetch('api/' + url, {
+    method, headers: body ? { 'Content-Type':'application/json' } : {}, body: body && JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'Erreur serveur');
+  return data;
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} }
-const uid = () => Math.random().toString(36).slice(2, 9);
+async function refresh(force) {
+  try {
+    const next = await api('GET', 'state');
+    const changed = JSON.stringify(next) !== JSON.stringify(state);
+    state = next;
+    const typing = ['INPUT', 'SELECT'].includes(document.activeElement?.tagName);
+    if (changed && (force || !typing)) render();
+    setOnline(true);
+  } catch { setOnline(false); }
+}
+async function act(fn) {
+  try { await fn(); await refresh(true); } catch (e) { alert(e.message); }
+}
+function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const name = id => (state.players.find(p => p.id === id) || { name:'?' }).name;
 
@@ -127,16 +143,16 @@ function addGame() {
   if (![a1, a2, b1, b2].every(Boolean)) return setErr('Choisissez les 4 joueurs.');
   if (draft.sa === '' || draft.sb === '') return setErr('Saisissez les deux scores.');
   if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return setErr('Scores invalides.');
-  state.games.push({ id:uid(), a:[a1, a2], b:[b1, b2], sa, sb });
-  save();
-  draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
-  tab = 'classement';
-  render();
+  act(async () => {
+    await api('POST', 'games', { a:[a1, a2], b:[b1, b2], sa, sb });
+    draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+    tab = 'classement';
+  });
 }
 function setErr(m) { draft.err = m; render(); }
 function delGame(id) {
   if (!confirm('Supprimer cette partie ?')) return;
-  state.games = state.games.filter(g => g.id !== id); save(); render();
+  act(() => api('DELETE', 'games/' + id));
 }
 
 function viewPlayers() {
@@ -152,23 +168,22 @@ function addPlayer(e) {
   e.preventDefault();
   const v = document.getElementById('pname').value.trim();
   if (!v) return;
-  state.players.push({ id:uid(), name:v }); save(); render();
-  document.getElementById('pname').focus();
+  act(() => api('POST', 'players', { name:v })).then(() => document.getElementById('pname')?.focus());
 }
 function delPlayer(id) {
-  if (state.games.some(g => [...g.a, ...g.b].includes(id)))
-    return alert('Ce joueur a déjà des parties enregistrées : supprimez-les d\'abord.');
-  state.players = state.players.filter(p => p.id !== id); save(); render();
+  act(() => api('DELETE', 'players/' + id));
 }
 function resetAll() {
   if (!confirm('Tout effacer (joueurs et parties) ?')) return;
-  state = { players:[], games:[] }; save(); render();
+  act(() => api('POST', 'reset'));
 }
 
 document.querySelector('nav').addEventListener('click', e => {
   if (e.target.dataset.tab) { tab = e.target.dataset.tab; render(); }
 });
 render();
+refresh(true);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>
