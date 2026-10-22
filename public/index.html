@@ -93,6 +93,9 @@ async function act(fn) {
 }
 function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Ordre alphabétique français (accents et majuscules ignorés : Émile entre Elsa et Félix)
+const byName = (x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' });
+const sortedPlayers = () => [...state.players].sort(byName);
 const name = id => (state.players.find(p => p.id === id) || { name:'?' }).name;
 
 function stats() {
@@ -106,7 +109,7 @@ function stats() {
       }
     }
   }
-  return Object.values(s).sort((x, y) => y.pts - x.pts || y.wins - x.wins || x.name.localeCompare(y.name, 'fr'));
+  return Object.values(s).sort((x, y) => y.pts - x.pts || y.wins - x.wins || byName(x, y));
 }
 
 function render() {
@@ -137,7 +140,7 @@ function viewRanking() {
 
 function select(field, label) {
   const taken = ['a1','a2','b1','b2'].filter(f => f !== field).map(f => draft[f]);
-  const opts = state.players.map(p =>
+  const opts = sortedPlayers().map(p =>
     `<option value="${p.id}" ${draft[field] === p.id ? 'selected' : ''} ${taken.includes(p.id) ? 'disabled' : ''}>${esc(p.name)}</option>`).join('');
   return `<select onchange="draft.${field}=this.value;render()" aria-label="${label}"><option value="">${label}</option>${opts}</select>`;
 }
@@ -179,7 +182,7 @@ function delGame(id) {
 }
 
 function viewPlayers() {
-  const list = state.players.map(p => `<div class="game"><span>${esc(p.name)}</span>
+  const list = sortedPlayers().map(p => `<div class="game"><span>${esc(p.name)}</span>
     <button class="ghost" onclick="delPlayer('${p.id}')">Retirer</button></div>`).join('');
   return `<div class="card"><h2>Ajouter un joueur</h2>
     <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40" autocomplete="off">
