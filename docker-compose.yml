@@ -2,23 +2,27 @@ services:
   score:
     build: .
     restart: unless-stopped
+    environment:
+      PORT: 3000
+      DB_PATH: /data/belote.db
     volumes:
       - score-data:/data
     networks: [traefik]
     labels:
       - traefik.enable=true
-      - traefik.docker.network=traefik
-      - traefik.http.routers.score.rule=Host(`belote.example.com`)
-      - traefik.http.routers.score.entrypoints=websecure
-      - traefik.http.routers.score.tls.certresolver=letsencrypt
-      - traefik.http.services.score.loadbalancer.server.port=3000
-      # Optionnel : protéger l'accès (htpasswd -nb user pass, $ doublés dans compose)
-      # - traefik.http.routers.score.middlewares=score-auth
-      # - traefik.http.middlewares.score-auth.basicauth.users=user:$$apr1$$...
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.${ROUTER_NAME}.rule=Host(`${APP_DOMAIN}`)
+      - traefik.http.routers.${ROUTER_NAME}.entrypoints=${TRAEFIK_ENTRYPOINT}
+      - traefik.http.routers.${ROUTER_NAME}.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.${ROUTER_NAME}.loadbalancer.server.port=3000
+      # Optionnel : protéger l'accès avec BASIC_AUTH_USERS (voir .env.example)
+      # - traefik.http.routers.${ROUTER_NAME}.middlewares=${ROUTER_NAME}-auth
+      # - traefik.http.middlewares.${ROUTER_NAME}-auth.basicauth.users=${BASIC_AUTH_USERS}
 
 volumes:
   score-data:
 
 networks:
   traefik:
-    external: true   # nom du réseau Docker partagé avec Traefik
+    name: ${TRAEFIK_NETWORK}
+    external: true

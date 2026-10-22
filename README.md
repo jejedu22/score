@@ -9,7 +9,13 @@ Les données sont stockées dans SQLite côté serveur ; les terminaux se synchr
 
 Variables : `PORT` (3000), `DB_PATH` (`./data/belote.db`, `/data/belote.db` dans l'image).
 
+## Configuration (.env)
+    cp .env.example .env      # puis adapter les valeurs
+    docker compose up -d --build
+
+`.env` contient le domaine, le nom du routeur, le réseau, l'entrypoint et le resolver Traefik,
+ainsi que les identifiants d'authentification basique (optionnelle). Il n'est pas versionné.
+
 ## Traefik
-Adapter dans `docker-compose.yml` : le `Host(...)`, le `certresolver`, le nom du réseau externe.
 L'application utilise des URLs relatives et fonctionne aussi sous un préfixe (`PathPrefix` + `StripPrefix`).
-Pas d'authentification intégrée : ajouter un middleware Traefik (basicauth) si besoin.
+Pas d'authentification intégrée : renseigner `BASIC_AUTH_USERS` dans `.env` et décommenter les deux lignes du middleware dans `docker-compose.yml`.
