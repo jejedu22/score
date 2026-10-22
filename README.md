@@ -6,7 +6,6 @@ Les données sont stockées dans SQLite côté serveur ; les terminaux se synchr
 ## PWA
 L'application s'installe sur l'écran d'accueil (Android : « Installer l'application » ; iOS : Partager → « Sur l'écran d'accueil »).
 Hors connexion, elle affiche le dernier classement chargé (lecture seule). L'installation exige HTTPS, fourni par Traefik.
-Après une modification de `public/`, incrémenter `CACHE` dans `public/sw.js`.
 
 ## Lancer
     node server.js            # Node >= 22.13, http://localhost:3000
