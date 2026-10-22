@@ -51,6 +51,14 @@
   .match h2 { display:flex; justify-content:space-between; align-items:center; }
   .side { display:grid; grid-template-columns:1fr 110px; gap:8px; align-items:center; margin-bottom:8px; }
   .tag { font-size:12px; font-weight:700; color:#fff; background:var(--accent); border-radius:6px; padding:2px 8px; }
+  tr.clickable { cursor:pointer; }
+  button.name { background:none; border:0; padding:0; font:inherit; color:inherit; text-align:left; cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; }
+  .res { font-weight:700; font-size:13px; border-radius:6px; padding:1px 6px; }
+  .res.v { color:#fff; background:var(--accent); }
+  .res.d { color:var(--danger); border:1px solid var(--danger); }
+  .res.n { color:var(--muted); border:1px solid var(--line); }
+  .totals { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; text-align:center; }
+  .totals b { display:block; font-size:22px; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
@@ -69,6 +77,7 @@ let state = { events:[], players:[], games:[] };
 const EVENT_KEY = 'belote-evenement';
 let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
+let playerView = null;   // id du joueur dont la fiche est affichée (par-dessus l'onglet courant)
 let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 // Scores en cours de saisie pour les matchs en cours, par id (survivent aux rafraîchissements)
 let scoreDraft = {};
@@ -146,9 +155,21 @@ function stats(games) {   // parties terminées uniquement
   return Object.values(s).filter(p => p.games).sort((x, y) => y.wins - x.wins || y.pts - x.pts || byName(x, y));
 }
 
+// Rangs avec ex aequo (mêmes victoires et points) : même rang, le suivant est décalé (1, 2, 2, 4)
+function withRanks(st) {
+  let rank = 0;
+  return st.map((p, i) => {
+    const prev = st[i - 1];
+    if (!prev || prev.wins !== p.wins || prev.pts !== p.pts) rank = i + 1;
+    return { ...p, rank };
+  });
+}
+
 function render() {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   const app = document.getElementById('app');
+  if (playerView && state.players.some(p => p.id === playerView)) { app.innerHTML = viewPlayer(playerView); return; }
+  playerView = null;
   const view = { classement:viewRanking, partie:viewGame, joueurs:viewPlayers, evenements:viewEvents }[tab]();
   app.innerHTML = (tab === 'classement' || tab === 'partie' ? eventBar() : '') + view;
 }
@@ -171,13 +192,9 @@ function viewRanking() {
   const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
       <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">Table ${g.table}</span></div>`).join('')}</div>` : '';
   if (!st.length) return live + `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
-  // Ex aequo (mêmes victoires et points) : même rang, le suivant est décalé (1, 2, 2, 4)
-  let rank = 0;
-  const rows = st.map((p, i) => {
-    const prev = st[i - 1];
-    if (!prev || prev.wins !== p.wins || prev.pts !== p.pts) rank = i + 1;
+  const rows = withRanks(st).map(({ rank, ...p }) => {
     const lead = rank === 1 ? 'win' : '';
-    return `<tr><td><span class="rank">${rank}.</span> ${esc(p.name)}</td>
+    return `<tr class="clickable" onclick="showPlayer('${p.id}')"><td><span class="rank">${rank}.</span> <button class="name">${esc(p.name)}</button></td>
     <td>${p.games}</td><td class="${lead}"><b>${p.wins}</b></td><td class="${lead}">${p.pts}</td></tr>`;
   }).join('');
   const history = [...games].reverse().map(g => fix[g.id] ? fixRow(g) : `<div class="game">
@@ -187,7 +204,7 @@ function viewRanking() {
       <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div></div>`).join('');
   return live + `<div class="card"><h2>Classement individuel</h2>
     <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table>
-    <p class="muted">Classés par victoires, puis par points.</p></div>
+    <p class="muted">Classés par victoires, puis par points. Touchez un joueur pour voir ses parties.</p></div>
     <div class="card"><h2>Historique (${games.length})</h2>${history}</div>`;
 }
 
@@ -314,7 +331,7 @@ function delGame(id) {
 }
 
 function viewPlayers() {
-  const list = sortedPlayers().map(p => `<div class="game"><span>${esc(p.name)}</span>
+  const list = sortedPlayers().map(p => `<div class="game"><button class="name" onclick="showPlayer('${p.id}')">${esc(p.name)}</button>
     <button class="ghost" onclick="delPlayer('${p.id}')">Retirer</button></div>`).join('');
   return `<div class="card"><h2>Ajouter un joueur</h2>
     <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40" autocomplete="off">
@@ -331,6 +348,47 @@ function addPlayer(e) {
 function delPlayer(id) {
   act(() => api('DELETE', 'players/' + id));
 }
+function showPlayer(id) { playerView = id; render(); window.scrollTo(0, 0); }
+
+// Fiche joueur : bilan global puis ses parties, groupées par événement (le plus récent d'abord)
+function viewPlayer(id) {
+  const me = state.players.find(p => p.id === id);
+  const back = `<button class="link" style="padding:0 0 12px" onclick="playerView=null;render()">← Retour</button>`;
+  const mine = g => g.a.includes(id) || g.b.includes(id);
+  const total = { games:0, wins:0, pts:0 };
+  const sections = eventsRecentFirst().map(ev => {
+    const games = eventGames(ev).filter(mine);
+    if (!games.length) return '';
+    const st = withRanks(stats(finishedGames(ev))).find(p => p.id === id);
+    if (st) { total.games += st.games; total.wins += st.wins; total.pts += st.pts; }
+    // En cours d'abord, puis les parties terminées de la plus récente à la plus ancienne
+    const when = g => g.finishedAt ?? Number.MAX_SAFE_INTEGER;
+    games.sort((x, y) => when(y) - when(x));
+    const rows = games.map(g => {
+      const [team, opp] = g.a.includes(id) ? [g.a, g.b] : [g.b, g.a];
+      const partner = name(team.find(x => x !== id));
+      const vs = `avec <b>${esc(partner)}</b> · contre ${teamNames(opp)}`;
+      if (isPending(g)) return `<div class="game"><div>${vs}</div><span class="tag">Table ${g.table}</span></div>`;
+      const [mineScore, oppScore] = g.a.includes(id) ? [g.sa, g.sb] : [g.sb, g.sa];
+      const res = mineScore > oppScore ? ['v', 'Victoire'] : mineScore < oppScore ? ['d', 'Défaite'] : ['n', 'Égalité'];
+      return `<div class="game"><div>${vs}<br><b>${mineScore}</b> – ${oppScore}</div>
+        <span class="res ${res[0]}">${res[1]}</span></div>`;
+    }).join('');
+    const summary = st
+      ? `${st.rank}<sup>${st.rank === 1 ? 'er' : 'e'}</sup> · ${st.wins} victoire${st.wins > 1 ? 's' : ''} · ${st.pts} pts`
+      : 'aucune partie terminée';
+    return `<div class="card"><h2>${esc(ev.name)}</h2><p class="muted" style="margin:-6px 0 6px">${fmtDate(ev.createdAt)} · ${summary}</p>${rows}</div>`;
+  }).join('');
+  const rate = total.games ? Math.round(100 * total.wins / total.games) : 0;
+  return back + `<div class="card"><h2>${esc(me.name)}</h2>
+    <div class="totals"><div><b>${total.games}</b><span class="muted">parties</span></div>
+    <div><b>${total.wins}</b><span class="muted">victoires</span></div>
+    <div><b>${rate} %</b><span class="muted">réussite</span></div>
+    <div><b>${total.pts}</b><span class="muted">points</span></div></div>
+    <p class="muted" style="margin-bottom:0">Tous événements confondus, parties terminées.</p></div>`
+    + (sections || `<div class="card muted">Aucune partie jouée pour l'instant.</div>`);
+}
+
 function viewEvents() {
   const cur = currentEvent();
   const list = eventsRecentFirst().map(e => {
@@ -373,7 +431,7 @@ function delEvent(id) {
 }
 
 document.querySelector('nav').addEventListener('click', e => {
-  if (e.target.dataset.tab) { tab = e.target.dataset.tab; render(); }
+  if (e.target.dataset.tab) { tab = e.target.dataset.tab; playerView = null; render(); }
 });
 render();
 refresh(true);
