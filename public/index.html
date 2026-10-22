@@ -35,9 +35,11 @@
   .team b { font-size:14px; color:var(--muted); }
   table { width:100%; border-collapse:collapse; }
   td, th { padding:8px 4px; text-align:right; border-bottom:1px solid var(--line); }
-  td:first-child, th:first-child { text-align:left; }
+  td:nth-child(-n+2), th:nth-child(-n+2) { text-align:left; }
   th { font-size:12px; color:var(--muted); font-weight:600; }
   .rank { color:var(--muted); width:28px; }
+  th button.sort { background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer; white-space:nowrap; }
+  th[aria-sort] button.sort { color:var(--ink); }
   .win { color:var(--accent); font-weight:700; }
   .muted { color:var(--muted); font-size:14px; }
   .game { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line); }
@@ -77,7 +79,26 @@ let state = { events:[], players:[], games:[] };
 const EVENT_KEY = 'belote-evenement';
 let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
-let playerView = null;   // id du joueur dont la fiche est affichée (par-dessus l'onglet courant)
+let playerView = null;
+// Tri du tableau de classement (mémorisé sur l'appareil) ; 'rank' = classement officiel
+const SORT_KEY = 'belote-tri';
+const SORTS = {
+  rank:  { label:'#',       first:1,  value:p => p.rank },
+  name:  { label:'Joueur',  first:1,  value:p => p.name },
+  games: { label:'Parties', first:-1, value:p => p.games },
+  wins:  { label:'Vict.',   first:-1, value:p => p.wins },
+  pts:   { label:'Points',  first:-1, value:p => p.pts },
+};
+let sort = (() => {
+  try { const v = JSON.parse(localStorage.getItem(SORT_KEY)); if (SORTS[v?.key] && Math.abs(v.dir) === 1) return v; } catch {}
+  return { key:'rank', dir:1 };
+})();
+function sortRanking(key) {
+  // Nouveau critère : son sens naturel (alphabétique, ou du plus grand au plus petit) ; même critère : on inverse
+  sort = sort.key === key ? { key, dir:-sort.dir } : { key, dir:SORTS[key].first };
+  try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch {}
+  render();
+}   // id du joueur dont la fiche est affichée (par-dessus l'onglet courant)
 let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 // Scores en cours de saisie pour les matchs en cours, par id (survivent aux rafraîchissements)
 let scoreDraft = {};
@@ -192,9 +213,12 @@ function viewRanking() {
   const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
       <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">Table ${g.table}</span></div>`).join('')}</div>` : '';
   if (!st.length) return live + `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
-  const rows = withRanks(st).map(({ rank, ...p }) => {
+  const { value } = SORTS[sort.key];
+  const cmp = sort.key === 'name' ? (x, y) => byName(x, y) : (x, y) => value(x) - value(y);
+  const ranked = withRanks(st).sort((x, y) => sort.dir * cmp(x, y) || x.rank - y.rank || byName(x, y));
+  const rows = ranked.map(({ rank, ...p }) => {
     const lead = rank === 1 ? 'win' : '';
-    return `<tr class="clickable" onclick="showPlayer('${p.id}')"><td><span class="rank">${rank}.</span> <button class="name">${esc(p.name)}</button></td>
+    return `<tr class="clickable" onclick="showPlayer('${p.id}')"><td class="rank">${rank}</td><td><button class="name">${esc(p.name)}</button></td>
     <td>${p.games}</td><td class="${lead}"><b>${p.wins}</b></td><td class="${lead}">${p.pts}</td></tr>`;
   }).join('');
   const history = [...games].reverse().map(g => fix[g.id] ? fixRow(g) : `<div class="game">
@@ -203,8 +227,12 @@ function viewRanking() {
       <div class="actions"><button class="link" onclick="startFix('${g.id}')">Corriger</button>
       <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div></div>`).join('');
   return live + `<div class="card"><h2>Classement individuel</h2>
-    <table><tr><th>Joueur</th><th>Parties</th><th>Vict.</th><th>Points</th></tr>${rows}</table>
-    <p class="muted">Classés par victoires, puis par points. Touchez un joueur pour voir ses parties.</p></div>
+    <table><tr>${Object.entries(SORTS).map(([key, { label }]) => {
+      const on = sort.key === key;
+      const aria = on ? ` aria-sort="${sort.dir === 1 ? 'ascending' : 'descending'}"` : '';
+      return `<th${aria}><button class="sort" onclick="sortRanking('${key}')">${label}${on ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}</button></th>`;
+    }).join('')}</tr>${rows}</table>
+    <p class="muted">Rang : victoires, puis points. Touchez un en-tête pour trier, un joueur pour voir ses parties.</p></div>
     <div class="card"><h2>Historique (${games.length})</h2>${history}</div>`;
 }
 
