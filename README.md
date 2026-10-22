@@ -1,6 +1,9 @@
 # Score Belote
 
 Score individuel d'un tournoi de belote (équipes différentes à chaque partie, scores arrondis à 10).
+Les parties sont rangées par **événement** (un tournoi = un événement, avec son propre classement) ;
+les joueurs sont communs à tous les événements. Une base existante sans événements est migrée
+automatiquement au démarrage : ses parties rejoignent un événement « Tournoi ».
 Les données sont stockées dans SQLite côté serveur ; les terminaux se synchronisent toutes les 5 s.
 
 ## PWA
