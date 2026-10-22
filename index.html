@@ -110,25 +110,20 @@ function viewGame() {
   return `<div class="card"><h2>Nouvelle partie</h2>
     <div class="grid2">
       <div class="team"><b>Équipe A</b>${select('a1','Joueur 1')}${select('a2','Joueur 2')}
-        <input type="number" inputmode="numeric" min="0" placeholder="Points A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="fill('sa','sb')"></div>
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=r10(this.value);render()"></div>
       <div class="team"><b>Équipe B</b>${select('b1','Joueur 1')}${select('b2','Joueur 2')}
-        <input type="number" inputmode="numeric" min="0" placeholder="Points B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="fill('sb','sa')"></div>
+        <input type="number" inputmode="numeric" min="0" step="10" placeholder="Points B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=r10(this.value);render()"></div>
     </div>
-    <p class="muted">Astuce : saisissez un score, l'autre se complète à 162 (modifiable, ex. avec belote/capot).</p>
+    <p class="muted">Saisissez le score total de la partie de chaque équipe, à la fin. Il est arrondi à la dizaine (ex. 1275 → 1280).</p>
     <div class="err">${esc(draft.err)}</div>
     <button class="btn" onclick="addGame()">Enregistrer la partie</button></div>`;
 }
 
-function fill(from, to) {
-  if (draft[to] === '' && draft[from] !== '') {
-    draft[to] = String(Math.max(0, 162 - Number(draft[from])));
-    render();
-  }
-}
+const r10 = v => v === '' ? '' : String(Math.round(Number(v) / 10) * 10);
 
 function addGame() {
   const { a1, a2, b1, b2 } = draft;
-  const sa = Number(draft.sa), sb = Number(draft.sb);
+  const sa = Number(r10(draft.sa)), sb = Number(r10(draft.sb));
   if (![a1, a2, b1, b2].every(Boolean)) return setErr('Choisissez les 4 joueurs.');
   if (draft.sa === '' || draft.sb === '') return setErr('Saisissez les deux scores.');
   if (sa < 0 || sb < 0 || !Number.isFinite(sa + sb)) return setErr('Scores invalides.');
