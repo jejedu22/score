@@ -94,7 +94,8 @@ function match(method, pathname) {
   }
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
 function serveStatic(pathname, res) {
   const file = path.normalize(path.join(PUBLIC, pathname === '/' ? 'index.html' : pathname));

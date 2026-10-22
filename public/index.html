@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Score Belote</title>
+<meta name="theme-color" content="#1f6b4a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Belote">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
 <style>
   :root { --bg:#f4f1ea; --card:#fff; --ink:#1d2b24; --muted:#6b7a72; --accent:#1f6b4a; --danger:#b3382c; --line:#e3ded2; }
   @media (prefers-color-scheme: dark) {
@@ -57,19 +63,21 @@ let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 async function api(method, url, body) {
   const r = await fetch('api/' + url, {
     method, headers: body ? { 'Content-Type':'application/json' } : {}, body: body && JSON.stringify(body),
-  });
+  }).catch(() => { throw new Error('Hors ligne : modification impossible.'); });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || 'Erreur serveur');
   return data;
 }
 async function refresh(force) {
   try {
-    const next = await api('GET', 'state');
+    const r = await fetch('api/state');
+    if (!r.ok) throw new Error();
+    const next = await r.json();
     const changed = JSON.stringify(next) !== JSON.stringify(state);
     state = next;
     const typing = ['INPUT', 'SELECT'].includes(document.activeElement?.tagName);
     if (changed && (force || !typing)) render();
-    setOnline(true);
+    setOnline(!r.headers.get('X-Offline'));
   } catch { setOnline(false); }
 }
 async function act(fn) {
@@ -184,6 +192,7 @@ document.querySelector('nav').addEventListener('click', e => {
 render();
 refresh(true);
 setInterval(refresh, 5000);
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>
 </html>
