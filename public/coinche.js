@@ -23,7 +23,9 @@
     const { taker, contract, coinche = 1, belote = null } = deal;
     const defense = taker === 'a' ? 'b' : 'a';
     const withPoints = settings.count === 'points' && contract !== CAPOT;
-    const bonus = side => (belote === side ? BELOTE : 0);
+    // Belote : +20 en « points faits » ; en « enchère seule », elle ne sert qu'à atteindre le contrat
+    // (les joueurs en tiennent compte en déclarant fait ou chuté) et ne rapporte aucun point
+    const bonus = side => (settings.count === 'points' && belote === side ? BELOTE : 0);
     // Contrat réussi : le preneur atteint son contrat, belote comprise (le capot se déclare fait ou chuté)
     const made = withPoints ? deal.points + bonus(taker) >= contract : !!deal.made;
     const score = { a: 0, b: 0 };

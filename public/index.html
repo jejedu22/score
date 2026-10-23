@@ -492,12 +492,12 @@ function dealForm(g, ev) {
     <div class="field"><span>Contrat</span><select aria-label="Contrat" onchange="setDeal('${g.id}','contract',this.value)">
       <option value="">Choisir…</option>${Coinche.CONTRACTS.map(c => `<option value="${c}" ${String(d.contract) === String(c) ? 'selected' : ''}>${c === Coinche.CAPOT ? 'Capot (250)' : c}</option>`).join('')}</select></div>
     <div class="field"><span>Coinche</span>${seg('coinche', [[1, 'Non'], [2, 'Coinché ×2'], [4, 'Surcoinché ×4']])}</div>
-    <div class="field"><span>Belote-rebelote (+20)</span>${seg('belote', [['', 'Aucune'], ['a', side(g, 'a')], ['b', side(g, 'b')]])}</div>
+    ${ev.count === 'points' ? `<div class="field"><span>Belote-rebelote (+20)</span>${seg('belote', [['', 'Aucune'], ['a', side(g, 'a')], ['b', side(g, 'b')]])}</div>` : ''}
     ${withPoints
       ? `<div class="field"><span>Points faits par le preneur (0 à 162, dix de der compris)</span>
         <input type="number" inputmode="numeric" min="0" max="162" value="${esc(d.points)}" aria-label="Points faits par le preneur"
           oninput="dealDraft['${g.id}'].points=this.value;dealPreview('${g.id}')"></div>`
-      : `<div class="field"><span>Contrat</span>${seg('made', [[true, 'Fait'], [false, 'Chuté']])}</div>`}
+      : `<div class="field"><span>Contrat${ev.count === 'contract' ? ' (belote comprise pour l\'atteindre)' : ''}</span>${seg('made', [[true, 'Fait'], [false, 'Chuté']])}</div>`}
     <div class="preview" id="prev-${g.id}">${previewText(g, ev)}</div>
     <div class="err">${esc(d.err ?? '')}</div>
     <div class="row"><button class="btn" onclick="submitDeal('${g.id}')">Valider la donne</button>
@@ -575,7 +575,8 @@ function viewSheet(id) {
 }
 
 function draftDeal(d) {
-  return { taker:d.taker, contract:Number(d.contract), coinche:Number(d.coinche), belote:d.belote || null,
+  const beloteCounts = currentEvent()?.count === 'points';
+  return { taker:d.taker, contract:Number(d.contract), coinche:Number(d.coinche), belote:(beloteCounts && d.belote) || null,
     points:d.points === '' ? null : Number(d.points), made:d.made };
 }
 function previewText(g, ev) {
@@ -1033,7 +1034,8 @@ function settingsPanel(e) {
     <div class="field"><span>Décompte d'une donne</span>${seg('count', [['contract', 'Enchère seule'], ['points', 'Enchère + points faits']])}</div>
     <p class="muted" style="margin:0">${s.count === 'points'
       ? 'Contrat réussi : le preneur marque contrat + ses points, la défense ses points (calculés automatiquement). Chute : la défense marque 160 + contrat.'
-      : 'Contrat réussi : le preneur marque le contrat. Chute : la défense marque le contrat.'} Coinche ×2, surcoinche ×4 ; belote +20.</p>` : ''}
+      : 'Contrat réussi : le preneur marque le contrat. Chute : la défense marque le contrat. La belote compte seulement pour atteindre le contrat (pas de points).'}
+      Coinche ×2, surcoinche ×4${s.count === 'points' ? ' ; belote +20' : ''}.</p>` : ''}
     <label class="field" style="display:flex;gap:8px;align-items:center"><input type="checkbox" style="width:auto" ${s.rounding ? 'checked' : ''}
       onchange="settingsDraft.rounding=this.checked">Arrondir les scores à la dizaine</label>
     <div class="field"><span>Couleurs</span><div class="row" style="justify-content:flex-start;gap:10px">${Object.entries(THEMES).map(([k, c]) =>
