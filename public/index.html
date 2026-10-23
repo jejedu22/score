@@ -116,7 +116,7 @@
 
 <script src="coinche.js"></script>
 <script>
-let state = { events:[], players:[], games:[], rests:[], teams:[], deals:[] };
+let state = { events:[], players:[], games:[], rests:[], teams:[], deals:[], roster:[] };
 const EVENT_KEY = 'belote-evenement';
 let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
@@ -185,6 +185,9 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>'
 // Ordre alphabétique français (accents et majuscules ignorés : Émile entre Elsa et Félix)
 const byName = (x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' });
 const sortedPlayers = () => [...state.players].sort(byName);
+// Joueurs inscrits à un événement (chaque événement a sa liste ; un joueur garde son identité de l'un à l'autre)
+const rosterIds = ev => state.roster.filter(r => r.eventId === ev?.id).map(r => r.playerId);
+const rosterPlayers = ev => { const ids = new Set(rosterIds(ev)); return sortedPlayers().filter(p => ids.has(p.id)); };
 const name = id => (state.players.find(p => p.id === id) || { name:'?' }).name;
 
 // Événement affiché : le choix mémorisé sur cet appareil, sinon le plus récent
@@ -196,6 +199,10 @@ function pickEvent(id) {
   eventId = id;
   try { localStorage.setItem(EVENT_KEY, id); } catch {}
   draft = { a1:'', a2:'', b1:'', b2:'', ta:'', tb:'', sa:'', sb:'', err:'' };
+  // Sélections propres à l'événement précédent
+  pickExisting = new Set();
+  planDraft.players = null;
+  teamDraft = { p1:'', p2:'', name:'' };
   render();
 }
 const eventGames = ev => state.games.filter(g => g.eventId === ev?.id);
@@ -229,9 +236,12 @@ function tableLabel(g) {
   if (g.stage === 'group') return `${groupName(g.grp)} · Tour ${g.round} · Table ${g.table}`;
   return g.round ? `Tour ${g.round} · Table ${g.table}` : `Table ${g.table}`;
 }
-const teamNames = ids => esc(ids.map(name).join(' & '));
+const teamNames = ids => esc(ids.filter(Boolean).map(name).join(' & '));
 // Joueurs d'une équipe, seulement si son nom ne les cite pas déjà (nom par défaut « A & B »)
-const teamPlayers = (t, wrap) => (t.name === t.players.map(name).join(' & ') ? '' : wrap(teamNames(t.players)));
+const teamPlayers = (t, wrap) => {
+  const ids = t.players.filter(Boolean);
+  return !ids.length || t.name === ids.map(name).join(' & ') ? '' : wrap(teamNames(ids));
+};
 // Un camp d'une partie : nom de l'équipe fixe (mode équipe) ou noms des deux joueurs
 function side(g, k) {
   const team = teamOf(k === 'a' ? g.teamA : g.teamB);
@@ -291,7 +301,7 @@ function render() {
   if (playerView && state.players.some(p => p.id === playerView)) { app.innerHTML = viewPlayer(playerView); return; }
   playerView = null;
   const view = { classement:viewRanking, partie:viewGame, joueurs:viewPlayers, evenements:viewEvents }[tab]();
-  app.innerHTML = (tab === 'classement' || tab === 'partie' ? eventBar() : '') + view;
+  app.innerHTML = (tab === 'evenements' ? '' : eventBar()) + view;
 }
 
 function eventBar() {
@@ -401,7 +411,7 @@ function viewRanking() {
 
 function select(field, label, atTable) {
   const taken = ['a1','a2','b1','b2'].filter(f => f !== field).map(f => draft[f]);
-  const opts = sortedPlayers().map(p => {
+  const opts = rosterPlayers(currentEvent()).map(p => {
     const t = atTable[p.id];
     return `<option value="${p.id}" ${draft[field] === p.id ? 'selected' : ''} ${taken.includes(p.id) || t ? 'disabled' : ''}>${esc(p.name)}${t ? ` (table ${t})` : ''}</option>`;
   }).join('');
@@ -423,10 +433,12 @@ function viewGame() {
   if (isTeamEvent(ev)) return ev.groups
     ? header + viewUpcoming(ev, round) + viewTournament(ev) + viewTeams(ev)
     : viewTeams(ev) + header + teamMatchForm(ev, pending) + viewTournament(ev);   // d'abord former les équipes
-  if (state.players.length < 4) return header + `<div class="card muted">Il faut au moins 4 joueurs.</div>`;
+  const roster = rosterPlayers(ev);
+  if (roster.length < 4) return header + `<div class="card muted">Il faut au moins 4 joueurs inscrits à cet événement
+    (onglet « Joueurs »).</div>`;
   const atTable = {};
   for (const g of pending) for (const id of [...g.a, ...g.b]) atTable[id] = g.table;
-  const free = state.players.length - Object.keys(atTable).length;
+  const free = roster.filter(p => !atTable[p.id]).length;
   const form = free < 4
     ? `<div class="card muted">Moins de 4 joueurs libres : saisissez un score pour en libérer, ou ajoutez des joueurs.</div>`
     : `<div class="card"><h2>Nouveau match</h2>
@@ -631,15 +643,16 @@ function viewTeams(ev) {
       <div class="actions"><button class="link" onclick="renameTeam('${t.id}')">Renommer</button>
       ${locked ? '' : `<button class="ghost" onclick="removeTeam('${t.id}')">Retirer</button>`}</div></div>`).join('');
   const taken = new Set(teams.flatMap(t => t.players));
-  const pick = (k, other) => `<select onchange="teamDraft.${k}=this.value" aria-label="Joueur ${k === 'p1' ? 1 : 2}">
-    <option value="">Joueur ${k === 'p1' ? 1 : 2}</option>${sortedPlayers().filter(p => !taken.has(p.id)).map(p =>
+  const pick = k => `<select onchange="teamDraft.${k}=this.value" aria-label="Joueur ${k === 'p1' ? 1 : 2} (facultatif)">
+    <option value="">Joueur ${k === 'p1' ? 1 : 2}</option>${rosterPlayers(ev).filter(p => !taken.has(p.id)).map(p =>
       `<option value="${p.id}" ${teamDraft[k] === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
   const form = locked ? '<p class="muted">Le tournoi est lancé : les équipes sont figées.</p>'
     : `<div class="grid2" style="margin-top:8px">${pick('p1')}${pick('p2')}</div>
-      <div class="row" style="margin-top:8px"><input placeholder="Nom de l'équipe (facultatif)" aria-label="Nom de l'équipe" maxlength="40"
+      <div class="row" style="margin-top:8px"><input placeholder="Nom de l'équipe" aria-label="Nom de l'équipe" maxlength="40"
         value="${esc(teamDraft.name)}" oninput="teamDraft.name=this.value">
       <button class="btn fit" onclick="addTeam()">Ajouter</button></div>`;
-  return `<div class="card"><h2>Équipes (${teams.length})</h2>${list || '<p class="muted">Aucune équipe : formez les paires ci-dessous.</p>'}${form}</div>`;
+  return `<div class="card"><h2>Équipes (${teams.length})</h2>${list || '<p class="muted">Aucune équipe pour l\'instant.</p>'}${form}
+    ${locked ? '' : '<p class="muted" style="margin-bottom:0">Un nom suffit : les joueurs sont facultatifs (choisis parmi ceux de l\'onglet « Joueurs »). Sans nom, l\'équipe prend celui de ses joueurs.</p>'}</div>`;
 }
 
 function teamMatchForm(ev, pending) {
@@ -726,9 +739,11 @@ function viewTournament(ev) {
 
 function addTeam() {
   const { p1, p2, name } = teamDraft;
-  if (!p1 || !p2 || p1 === p2) return alert('Choisissez deux joueurs différents.');
+  const players = [p1, p2].filter(Boolean);
+  if (!name.trim() && !players.length) return alert("Donnez un nom à l'équipe, ou choisissez ses joueurs.");
+  if (p1 && p1 === p2) return alert('Choisissez deux joueurs différents.');
   act(async () => {
-    await api('POST', `events/${currentEvent().id}/teams`, { players:[p1, p2], name:name.trim() });
+    await api('POST', `events/${currentEvent().id}/teams`, { players, name:name.trim() });
     teamDraft = { p1:'', p2:'', name:'' };
   });
 }
@@ -785,12 +800,12 @@ function viewUpcoming(ev, round) {
 }
 
 function viewPlanner(ev) {
-  const chosen = planDraft.players ?? state.players.map(p => p.id);
+  const chosen = (planDraft.players ?? rosterIds(ev)).filter(id => rosterIds(ev).includes(id));
   const n = chosen.length;
   const adhoc = eventGames(ev).some(g => isPending(g) && g.round === null);
   const info = n < 4 ? 'Cochez au moins 4 joueurs.'
     : `${n} joueurs : ${Math.floor(n / 4)} table${n >= 8 ? 's' : ''} par tour${n % 4 ? `, ${n % 4} au repos à tour de rôle` : ''}.`;
-  const boxes = sortedPlayers().map(p => `<label><input type="checkbox" ${chosen.includes(p.id) ? 'checked' : ''}
+  const boxes = rosterPlayers(ev).map(p => `<label><input type="checkbox" ${chosen.includes(p.id) ? 'checked' : ''}
     onchange="togglePlanPlayer('${p.id}', this.checked)">${esc(p.name)}</label>`).join('');
   return `<div class="card"><details ${planDraft.open ? 'open' : ''} ontoggle="planDraft.open=this.open">
     <summary>Planifier des tours</summary>
@@ -808,7 +823,7 @@ function viewPlanner(ev) {
   </details>${planDraft.msg ? `<p class="ok" style="margin:8px 0 0">${esc(planDraft.msg)}</p>` : ''}</div>`;
 }
 function togglePlanPlayer(id, on) {
-  const cur = new Set(planDraft.players ?? state.players.map(p => p.id));
+  const cur = new Set(planDraft.players ?? rosterIds(currentEvent()));
   on ? cur.add(id) : cur.delete(id);
   planDraft.players = [...cur];
   planDraft.msg = '';
@@ -817,7 +832,7 @@ function togglePlanPlayer(id, on) {
 function planAll(on) { planDraft.players = on ? null : []; planDraft.msg = ''; render(); }
 function makePlan() {
   const ev = currentEvent();
-  const players = (planDraft.players ?? state.players.map(p => p.id)).filter(id => state.players.some(p => p.id === id));
+  const players = (planDraft.players ?? rosterIds(ev)).filter(id => rosterIds(ev).includes(id));
   const rounds = Number(planDraft.rounds);
   if (!Number.isInteger(rounds) || rounds < 1 || rounds > 30) return alert('Nombre de tours : entre 1 et 30.');
   act(async () => {
@@ -925,23 +940,56 @@ function delGame(id) {
   act(() => api('DELETE', 'games/' + id));
 }
 
+// Joueurs de l'événement affiché ; on peut reprendre des joueurs d'autres événements
+let pickExisting = new Set();
 function viewPlayers() {
-  const list = sortedPlayers().map(p => `<div class="game"><button class="name" onclick="showPlayer('${p.id}')">${esc(p.name)}</button>
-    <button class="ghost" onclick="delPlayer('${p.id}')">Retirer</button></div>`).join('');
+  const ev = currentEvent();
+  if (!ev) return noEvent();
+  const roster = rosterPlayers(ev);
+  const inRoster = new Set(roster.map(p => p.id));
+  const others = sortedPlayers().filter(p => !inRoster.has(p.id));
+  const used = id => state.games.some(g => [...g.a, ...g.b].includes(id)) || state.teams.some(t => t.players.includes(id));
+  const list = roster.map(p => `<div class="game"><button class="name" onclick="showPlayer('${p.id}')">${esc(p.name)}</button>
+    ${isClosed(ev) ? '' : `<button class="ghost" onclick="unenroll('${p.id}')">Retirer</button>`}</div>`).join('');
+  if (isClosed(ev)) return closedBanner(ev) + `<div class="card"><h2>Joueurs (${roster.length})</h2>${list || '<span class="muted">Aucun joueur.</span>'}</div>`;
+  const otherList = others.map(p => {
+    const orphan = !state.roster.some(r => r.playerId === p.id) && !used(p.id);
+    return `<div class="game"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" style="width:auto"
+      ${pickExisting.has(p.id) ? 'checked' : ''} onchange="pickExisting[this.checked ? 'add' : 'delete']('${p.id}');render()">${esc(p.name)}</label>
+      ${orphan ? `<button class="ghost" onclick="delPlayer('${p.id}')">Suppr.</button>` : ''}</div>`;
+  }).join('');
   return `<div class="card"><h2>Ajouter un joueur</h2>
-    <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40" autocomplete="off">
-    <button class="btn fit">Ajouter</button></form></div>
-    <div class="card"><h2>Joueurs (${state.players.length})</h2>${list || '<span class="muted">Aucun joueur.</span>'}
-    <p class="muted">Les joueurs sont communs à tous les événements.</p></div>`;
+    <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40"
+      autocomplete="off" list="known-players">
+    <datalist id="known-players">${others.map(p => `<option value="${esc(p.name)}">`).join('')}</datalist>
+    <button class="btn fit">Ajouter</button></form>
+    <p class="muted" style="margin-bottom:0">Un nom déjà connu reprend le joueur existant (son historique le suit).</p></div>
+    <div class="card"><h2>Joueurs de l'événement (${roster.length})</h2>${list || '<span class="muted">Aucun joueur inscrit.</span>'}</div>
+    ${others.length ? `<div class="card"><details ${pickExisting.size ? 'open' : ''}><summary>Joueurs d'autres événements (${others.length})</summary>
+      <div class="row" style="margin:6px 0"><span class="fit"><button class="link" onclick="pickAllOthers(true)">Tout cocher</button>
+        <button class="link" onclick="pickAllOthers(false)">Aucun</button></span></div>
+      ${otherList}
+      <button class="btn" style="margin-top:8px" onclick="enrollPicked()" ${pickExisting.size ? '' : 'disabled'}>Ajouter ${pickExisting.size || ''} joueur${pickExisting.size > 1 ? 's' : ''}</button>
+    </details></div>` : ''}`;
+}
+function pickAllOthers(on) {
+  const ids = new Set(rosterIds(currentEvent()));
+  pickExisting = new Set(on ? state.players.filter(p => !ids.has(p.id)).map(p => p.id) : []);
+  render();
 }
 function addPlayer(e) {
   e.preventDefault();
   const v = document.getElementById('pname').value.trim();
   if (!v) return;
-  act(() => api('POST', 'players', { name:v })).then(() => document.getElementById('pname')?.focus());
+  act(() => api('POST', `events/${currentEvent().id}/players`, { name:v })).then(() => document.getElementById('pname')?.focus());
 }
+function enrollPicked() {
+  const ids = [...pickExisting];
+  act(async () => { await api('POST', `events/${currentEvent().id}/players`, { ids }); pickExisting = new Set(); });
+}
+function unenroll(id) { act(() => api('DELETE', `events/${currentEvent().id}/players/${id}`)); }
 function delPlayer(id) {
-  act(() => api('DELETE', 'players/' + id));
+  if (confirm(`Supprimer définitivement « ${name(id)} » ? (il n'est inscrit à aucun événement)`)) act(() => api('DELETE', 'players/' + id));
 }
 function showPlayer(id) { playerView = id; render(); window.scrollTo(0, 0); }
 

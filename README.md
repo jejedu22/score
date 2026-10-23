@@ -1,8 +1,10 @@
 # Score Belote
 
 Score individuel d'un tournoi de belote (équipes différentes à chaque partie, scores arrondis à 10).
-Les parties sont rangées par **événement** (un tournoi = un événement, avec son propre classement) ;
-les joueurs sont communs à tous les événements. Une base existante sans événements est migrée
+Les parties sont rangées par **événement** (un tournoi = un événement, avec son propre classement).
+Chaque événement a **sa liste de joueurs** ; on peut y reprendre des joueurs d'autres événements, qui
+gardent leur identité (et leur historique). En mode équipe, les joueurs d'une équipe sont facultatifs :
+un nom d'équipe suffit. Une base existante sans événements est migrée
 automatiquement au démarrage : ses parties rejoignent un événement « Tournoi ».
 
 Plusieurs matchs peuvent se jouer en même temps : on forme les équipes à l'avance (scores vides),
