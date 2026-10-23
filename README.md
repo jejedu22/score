@@ -31,9 +31,14 @@ planification) et peut être rouvert.
 « enchère + points faits » (points de la défense calculés automatiquement), arrondi à la dizaine,
 et jeu de couleurs propre à l'événement. Les règles de décompte sont dans `public/coinche.js`,
 partagé par le navigateur (aperçu de la donne) et le serveur (calcul enregistré) :
-contrats 80 à 160 et capot (250), coinche ×2, surcoinche ×4, belote +20 ; chute : la défense
-marque 160 + contrat. Plusieurs téléphones peuvent suivre et saisir la même partie : une donne
+contrats 80 à 160 et capot (250), coinche ×2, surcoinche ×4. En « enchère + points faits » : belote +20,
+chute : la défense marque 160 + contrat. En « enchère seule » : la belote ne compte que pour atteindre
+le contrat (aucun point), chute : la défense marque le contrat. Plusieurs téléphones peuvent suivre et saisir la même partie : une donne
 saisie en double est refusée.
+
+Chaque partie a sa **feuille de points** sur un écran à part, à l'adresse `#feuille/<id>` : on peut
+l'ouvrir directement sur le téléphone de la table ou partager son lien. Elle affiche les totaux, le
+détail de chaque donne avec le cumul, la saisie de la donne suivante, et garde l'écran allumé.
 Les données sont stockées dans SQLite côté serveur ; les terminaux se synchronisent toutes les 5 s.
 
 ## PWA

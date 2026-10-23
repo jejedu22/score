@@ -68,7 +68,7 @@
   .match h2 { display:flex; justify-content:space-between; align-items:center; }
   .side { display:grid; grid-template-columns:1fr 110px; gap:8px; align-items:center; margin-bottom:8px; }
   .tag { font-size:12px; font-weight:700; color:#fff; background:var(--accent); border-radius:6px; padding:2px 8px; }
-  tr.clickable { cursor:pointer; }
+  .clickable { cursor:pointer; }
   button.name { background:none; border:0; padding:0; font:inherit; color:inherit; text-align:left; cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px; }
   .res { font-weight:700; font-size:13px; border-radius:6px; padding:1px 6px; }
   .res.v { color:#fff; background:var(--accent); }
@@ -162,8 +162,9 @@ async function refresh(force) {
     const r = await fetch('api/state');
     if (!r.ok) throw new Error();
     const next = await r.json();
-    const changed = JSON.stringify(next) !== JSON.stringify(state);
+    const changed = JSON.stringify(next) !== JSON.stringify(state) || !loaded;
     state = next;
+    if (!loaded) { loaded = true; if (sheetView) return onRoute(); }   // feuille ouverte par lien : aller sur son événement
     const typing = ['INPUT', 'SELECT'].includes(document.activeElement?.tagName);
     if (changed && (force || !typing)) render();
     setOnline(!r.headers.get('X-Offline'));
@@ -286,6 +287,7 @@ function render() {
   applyTheme();
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   const app = document.getElementById('app');
+  if (sheetView) { app.innerHTML = viewSheet(sheetView); return; }
   if (playerView && state.players.some(p => p.id === playerView)) { app.innerHTML = viewPlayer(playerView); return; }
   playerView = null;
   const view = { classement:viewRanking, partie:viewGame, joueurs:viewPlayers, evenements:viewEvents }[tab]();
@@ -370,7 +372,7 @@ function viewRanking() {
   if (!ev) return noEvent();
   const games = finishedGames(ev);
   const pending = pendingGames(ev);
-  const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
+  const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game clickable" onclick="openSheet('${g.id}')">
       <div>${side(g, 'a')}<br>${side(g, 'b')}</div>${liveScore(g)}<span class="tag">${tableLabel(g)}</span></div>`).join('')}</div>` : '';
   let main = '';
   if (isTeamEvent(ev)) {
@@ -389,7 +391,8 @@ function viewRanking() {
       <span class="${g.sa > g.sb ? 'win' : ''}">${side(g, 'a')} <b>${g.sa}</b></span><br>
       <span class="${g.sb > g.sa ? 'win' : ''}">${side(g, 'b')} <b>${g.sb}</b></span></div>
       ${gameDeals(g).length ? `<br><span class="muted" style="font-size:13px">${gameDeals(g).length} donnes</span>` : ''}
-      ${isClosed(ev) ? '' : `<div class="actions">${gameDeals(g).length ? `<button class="link" onclick="undoDeal('${g.id}')">Dernière donne ↶</button>` : ''}
+      ${gameDeals(g).length ? `<button class="link" style="padding:0" onclick="openSheet('${g.id}')">Feuille de points</button>` : ''}
+      ${isClosed(ev) ? '' : `<div class="actions">
       <button class="link" onclick="startFix('${g.id}')">Corriger</button>
       ${g.stage ? '' : `<button class="ghost" onclick="delGame('${g.id}')">Suppr.</button>`}</div>`}</div>`).join('');
   return closedBanner(ev) + live + main
@@ -466,37 +469,114 @@ const gameDeals = g => state.deals.filter(d => d.gameId === g.id).sort((x, y) =>
 const dealTotals = deals => deals.reduce(([a, b], d) => [a + d.pa, b + d.pb], [0, 0]);
 const sideShort = (g, k) => side(g, k);
 
+// Carte compacte dans l'onglet Partie : score en direct et accès à la feuille de points
 function dealCard(g, ev) {
   const deals = gameDeals(g);
   const [sa, sb] = dealTotals(deals);
-  const d = dealDraft[g.id] ??= { taker:'', contract:'', coinche:1, belote:'', points:'', made:null };
-  const goal = ev.endType === 'points' ? `objectif ${ev.endValue} pts` : `donne ${deals.length + 1} sur ${ev.endValue}`;
-  const seg = (key, options) => `<div class="seg">${options.map(([v, label]) =>
-    `<button type="button" class="${String(d[key]) === String(v) ? 'on' : ''}" onclick="setDeal('${g.id}','${key}',${JSON.stringify(v).replace(/"/g, "'")})">${label}</button>`).join('')}</div>`;
-  const rows = deals.map(x => `<tr><td>${x.idx + 1}</td><td style="text-align:left">${sideShort(g, x.taker)} ${x.contract === Coinche.CAPOT ? 'capot' : x.contract}${x.coinche > 1 ? ` ×${x.coinche}` : ''}
-    ${x.made ? '✓' : '✗'}${x.belote ? ' <span class="muted">B</span>' : ''}</td><td>${x.pa}</td><td>${x.pb}</td></tr>`).join('');
-  const withPoints = ev.count === 'points' && Number(d.contract) !== Coinche.CAPOT;
+  const goal = ev.endType === 'points' ? `objectif ${ev.endValue} pts` : `donne ${Math.min(deals.length + 1, ev.endValue)} sur ${ev.endValue}`;
   return `<div class="card match"><h2><span>${tableLabel(g)}</span>
       ${g.stage ? '' : `<button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button>`}</h2>
-    <div class="totals-live"><div>${side(g, 'a')}<b>${sa}</b></div><span class="muted">${goal}</span><div>${side(g, 'b')}<b>${sb}</b></div></div>
-    ${deals.length ? `<table class="deals"><tr><th>#</th><th style="text-align:left">Contrat</th><th>A</th><th>B</th></tr>${rows}</table>` : ''}
+    <div class="totals-live"><div>${side(g, 'a')}<b>${sa}</b></div><span class="muted">${deals.length} donne${deals.length > 1 ? 's' : ''}<br>${goal}</span><div>${side(g, 'b')}<b>${sb}</b></div></div>
+    <button class="btn" style="width:100%" onclick="openSheet('${g.id}')">Feuille de points</button></div>`;
+}
+
+// Formulaire de la donne suivante (feuille de points)
+function dealForm(g, ev) {
+  const deals = gameDeals(g);
+  const d = dealDraft[g.id] ??= { taker:'', contract:'', coinche:1, belote:'', points:'', made:null };
+  const seg = (key, options) => `<div class="seg">${options.map(([v, label]) =>
+    `<button type="button" class="${String(d[key]) === String(v) ? 'on' : ''}" onclick="setDeal('${g.id}','${key}',${JSON.stringify(v).replace(/"/g, "'")})">${label}</button>`).join('')}</div>`;
+  const withPoints = ev.count === 'points' && Number(d.contract) !== Coinche.CAPOT;
+  return `<div class="card"><h2>Donne ${deals.length + 1}</h2>
     <div class="field"><span>Preneur</span>${seg('taker', [['a', side(g, 'a')], ['b', side(g, 'b')]])}</div>
     <div class="field"><span>Contrat</span><select aria-label="Contrat" onchange="setDeal('${g.id}','contract',this.value)">
       <option value="">Choisir…</option>${Coinche.CONTRACTS.map(c => `<option value="${c}" ${String(d.contract) === String(c) ? 'selected' : ''}>${c === Coinche.CAPOT ? 'Capot (250)' : c}</option>`).join('')}</select></div>
     <div class="field"><span>Coinche</span>${seg('coinche', [[1, 'Non'], [2, 'Coinché ×2'], [4, 'Surcoinché ×4']])}</div>
-    <div class="field"><span>Belote-rebelote (+20)</span>${seg('belote', [['', 'Aucune'], ['a', side(g, 'a')], ['b', side(g, 'b')]])}</div>
+    ${ev.count === 'points' ? `<div class="field"><span>Belote-rebelote (+20)</span>${seg('belote', [['', 'Aucune'], ['a', side(g, 'a')], ['b', side(g, 'b')]])}</div>` : ''}
     ${withPoints
       ? `<div class="field"><span>Points faits par le preneur (0 à 162, dix de der compris)</span>
         <input type="number" inputmode="numeric" min="0" max="162" value="${esc(d.points)}" aria-label="Points faits par le preneur"
           oninput="dealDraft['${g.id}'].points=this.value;dealPreview('${g.id}')"></div>`
-      : `<div class="field"><span>Contrat</span>${seg('made', [[true, 'Fait'], [false, 'Chuté']])}</div>`}
+      : `<div class="field"><span>Résultat${ev.count === 'contract' ? ' (belote comprise pour atteindre le contrat)' : ''}</span>${seg('made', [[true, 'Fait'], [false, 'Chuté']])}</div>`}
     <div class="preview" id="prev-${g.id}">${previewText(g, ev)}</div>
     <div class="err">${esc(d.err ?? '')}</div>
     <div class="row"><button class="btn" onclick="submitDeal('${g.id}')">Valider la donne</button>
     ${deals.length ? `<button class="link fit" onclick="undoDeal('${g.id}')">Annuler la dernière</button>` : ''}</div></div>`;
 }
+
+// --- Feuille de points : un écran par partie, à l'adresse #feuille/<id> (lien partageable) ---
+let sheetView = null, sheetFromApp = false, loaded = false, wakeLock = null;
+const sheetFromHash = () => (location.hash.match(/^#feuille\/([0-9a-f]{10})$/) || [])[1] || null;
+function openSheet(id) { sheetFromApp = true; location.hash = 'feuille/' + id; }
+function closeSheet() {
+  if (sheetFromApp) return history.back();   // retour à l'écran d'où l'on vient
+  history.replaceState(null, '', location.pathname + location.search);
+  onRoute();
+}
+function onRoute() {
+  sheetView = sheetFromHash();
+  if (!sheetView) sheetFromApp = false;
+  const g = state.games.find(x => x.id === sheetView);
+  if (g && g.eventId !== eventId) { eventId = g.eventId; try { localStorage.setItem(EVENT_KEY, eventId); } catch {} }
+  keepAwake();
+  render();
+  window.scrollTo(0, 0);
+}
+// Écran toujours allumé pendant qu'une feuille est ouverte (si le navigateur le permet)
+async function keepAwake() {
+  try {
+    if (sheetView && !document.hidden && !wakeLock && navigator.wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!sheetView && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch { wakeLock = null; }
+}
+function shareSheet(id) {
+  const url = location.href.split('#')[0] + '#feuille/' + id;
+  if (navigator.share) return navigator.share({ title:'Feuille de points', url }).catch(() => {});
+  navigator.clipboard?.writeText(url).then(() => alert('Lien de la feuille copié.'), () => prompt('Lien de la feuille :', url))
+    ?? prompt('Lien de la feuille :', url);
+}
+
+function viewSheet(id) {
+  const back = `<button class="link" style="padding:0 0 12px" onclick="closeSheet()">← Retour</button>`;
+  const g = state.games.find(x => x.id === id);
+  if (!g) return back + `<div class="card muted">${loaded ? 'Feuille introuvable : la partie a peut-être été supprimée.' : 'Chargement…'}</div>`;
+  const ev = state.events.find(e => e.id === g.eventId);
+  const deals = gameDeals(g);
+  const finished = !isPending(g);
+  const [sa, sb] = finished ? [g.sa, g.sb] : dealTotals(deals);
+  const open = !isClosed(ev);
+  const byDeal = ev.entry === 'deals' || deals.length;
+  let status;
+  if (finished) status = g.sa === g.sb ? 'Égalité' : `Vainqueur : ${side(g, g.sa > g.sb ? 'a' : 'b')}`;
+  else if (byDeal) status = ev.endType === 'points' ? `Objectif ${ev.endValue} pts` : `Donne ${Math.min(deals.length + 1, ev.endValue)} sur ${ev.endValue}`;
+  else status = 'En cours';
+  let ca = 0, cb = 0;
+  const rows = deals.map(x => {
+    ca += x.pa; cb += x.pb;
+    const detail = [x.made ? 'fait' : 'chuté', x.points !== null ? `${x.points} pts faits` : '', x.belote ? `belote ${side(g, x.belote)}` : '']
+      .filter(Boolean).join(' · ');
+    return `<tr><td>${x.idx + 1}</td><td style="text-align:left">${side(g, x.taker)} · ${x.contract === Coinche.CAPOT ? 'capot' : x.contract}${x.coinche > 1 ? ` ×${x.coinche}` : ''}
+      <br><span class="muted">${detail}</span></td><td>${x.pa}<br><span class="muted">${ca}</span></td><td>${x.pb}<br><span class="muted">${cb}</span></td></tr>`;
+  }).join('');
+  const table = deals.length ? `<div class="card"><h2>Donnes</h2><table class="deals"><tr><th>#</th><th style="text-align:left">Preneur · contrat</th>
+    <th>A</th><th>B</th></tr>${rows}</table><p class="muted" style="margin-bottom:0">En gris : total cumulé. A = ${side(g, 'a')}, B = ${side(g, 'b')}.</p></div>` : '';
+  let action = '';
+  if (!finished && open) action = byDeal ? dealForm(g, ev) : matchCards([g], { entry:'total' });
+  if (finished && open && deals.length) action = `<p><button class="link" style="padding:0" onclick="undoDeal('${g.id}')">Annuler la dernière donne (reprendre la partie)</button></p>`;
+  return back + `<div class="card ${finished ? 'champion' : ''}">
+      <p class="muted" style="margin:0 0 4px">${esc(ev.name)} · ${tableLabel(g)}</p>
+      <div class="totals-live"><div>${side(g, 'a')}<b>${sa}</b></div><span class="muted">${status}</span><div>${side(g, 'b')}<b>${sb}</b></div></div>
+      ${rulesNote(ev).replace('<p class="muted">', '<p class="muted" style="margin:0">')}
+      ${isClosed(ev) ? '<p class="muted" style="margin:6px 0 0">🔒 Événement clos : consultation seule.</p>' : ''}
+    </div>` + action + table
+    + `<p><button class="link" style="padding:0" onclick="shareSheet('${g.id}')">Partager le lien de cette feuille</button></p>`;
+}
+
 function draftDeal(d) {
-  return { taker:d.taker, contract:Number(d.contract), coinche:Number(d.coinche), belote:d.belote || null,
+  const beloteCounts = currentEvent()?.count === 'points';
+  return { taker:d.taker, contract:Number(d.contract), coinche:Number(d.coinche), belote:(beloteCounts && d.belote) || null,
     points:d.points === '' ? null : Number(d.points), made:d.made };
 }
 function previewText(g, ev) {
@@ -526,7 +606,7 @@ function submitDeal(id) {
     const data = await api('POST', `games/${id}/deals`, { idx:gameDeals(g).length, ...deal });
     dealDraft[id] = { taker:'', contract:'', coinche:1, belote:'', points:'', made:null };
     const done = data.games.find(x => x.id === id);
-    if (done?.sa !== null) {
+    if (done?.sa !== null && !sheetView) {   // sur la feuille, le résultat est déjà affiché
       const winner = done.sa === done.sb ? 'Égalité' : `Vainqueur : ${side(g, done.sa > done.sb ? "a" : "b")}`;
       finishedNote = `Partie terminée (${tableLabel(g)}) : ${side(g, 'a')} ${done.sa} – ${done.sb} ${side(g, 'b')}. ${winner}.`;
     }
@@ -883,7 +963,7 @@ function viewPlayer(id) {
       const [team, opp] = g.a.includes(id) ? [g.a, g.b] : [g.b, g.a];
       const partner = name(team.find(x => x !== id));
       const vs = `avec <b>${esc(partner)}</b> · contre ${teamNames(opp)}`;
-      if (isPending(g)) return `<div class="game"><div>${vs}</div><span class="tag">${tableLabel(g)}</span></div>`;
+      if (isPending(g)) return `<div class="game clickable" onclick="openSheet('${g.id}')"><div>${vs}</div><span class="tag">${tableLabel(g)}</span></div>`;
       const [mineScore, oppScore] = g.a.includes(id) ? [g.sa, g.sb] : [g.sb, g.sa];
       const res = mineScore > oppScore ? ['v', 'Victoire'] : mineScore < oppScore ? ['d', 'Défaite'] : ['n', 'Égalité'];
       return `<div class="game"><div>${vs}<br><b>${mineScore}</b> – ${oppScore}</div>
@@ -954,7 +1034,8 @@ function settingsPanel(e) {
     <div class="field"><span>Décompte d'une donne</span>${seg('count', [['contract', 'Enchère seule'], ['points', 'Enchère + points faits']])}</div>
     <p class="muted" style="margin:0">${s.count === 'points'
       ? 'Contrat réussi : le preneur marque contrat + ses points, la défense ses points (calculés automatiquement). Chute : la défense marque 160 + contrat.'
-      : 'Contrat réussi : le preneur marque le contrat. Chute : la défense marque 160 + contrat.'} Coinche ×2, surcoinche ×4 ; belote +20.</p>` : ''}
+      : 'Contrat réussi : le preneur marque le contrat. Chute : la défense marque le contrat. La belote compte seulement pour atteindre le contrat (pas de points).'}
+      Coinche ×2, surcoinche ×4${s.count === 'points' ? ' ; belote +20' : ''}.</p>` : ''}
     <label class="field" style="display:flex;gap:8px;align-items:center"><input type="checkbox" style="width:auto" ${s.rounding ? 'checked' : ''}
       onchange="settingsDraft.rounding=this.checked">Arrondir les scores à la dizaine</label>
     <div class="field"><span>Couleurs</span><div class="row" style="justify-content:flex-start;gap:10px">${Object.entries(THEMES).map(([k, c]) =>
@@ -999,8 +1080,15 @@ function delEvent(id) {
 }
 
 document.querySelector('nav').addEventListener('click', e => {
-  if (e.target.dataset.tab) { tab = e.target.dataset.tab; playerView = null; render(); }
+  if (!e.target.dataset.tab) return;
+  tab = e.target.dataset.tab;
+  playerView = null;
+  if (sheetView) { history.replaceState(null, '', location.pathname + location.search); sheetView = null; sheetFromApp = false; keepAwake(); }
+  render();
 });
+window.addEventListener('hashchange', onRoute);
+document.addEventListener('visibilitychange', keepAwake);
+sheetView = sheetFromHash();
 render();
 refresh(true);
 setInterval(() => { if (!document.hidden) refresh(); }, 5000);
