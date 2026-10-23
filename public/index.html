@@ -35,6 +35,10 @@
   nav button { flex:1; padding:10px 4px; font-size:15px !important; border:0; border-radius:10px; background:var(--card); color:var(--ink); font:inherit; font-weight:600; }
   nav button.on { background:var(--accent); color:#fff; }
   main { padding:0 16px 40px; max-width:640px; margin:0 auto; }
+  /* Feuille de points : plein écran (sans titre ni onglets), l'avertissement hors ligne reste visible */
+  body.sheet > header, body.sheet > nav { display:none; }
+  body.sheet main { padding-top:14px; }
+  body.sheet.offline main::before { content:'⚠ hors ligne : dernier état connu'; display:block; color:var(--danger); font-size:14px; margin-bottom:8px; }
   .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; border:1px solid var(--line); }
   h2 { margin:0 0 10px; font-size:17px; }
   input, select { font:inherit; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); width:100%; }
@@ -216,7 +220,10 @@ async function act(fn, done) {
   } catch (e) { toast(e.message, true); await refresh(true); render(); }   // erreur : afficher l'état réel
   finally { busy = false; document.body.classList.remove('busy'); }
 }
-function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
+function setOnline(ok) {
+  document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne';
+  document.body.classList.toggle('offline', !ok);
+}
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Ordre alphabétique français (accents et majuscules ignorés : Émile entre Elsa et Félix)
 const byName = (x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' });
@@ -334,6 +341,7 @@ function render() {
   applyTheme();
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   const app = document.getElementById('app');
+  document.body.classList.toggle('sheet', !!sheetView);
   if (sheetView) { app.innerHTML = viewSheet(sheetView); return; }
   if (playerView && state.players.some(p => p.id === playerView)) { app.innerHTML = viewPlayer(playerView); return; }
   playerView = null;
@@ -1184,6 +1192,7 @@ function addEvent(e) {
 function openEvent(id) { tab = 'partie'; pickEvent(id); window.scrollTo(0, 0); }
 // Paramètres de l'événement depuis n'importe quel onglet (bouton ⚙)
 function openSettings(id) {
+  if (sheetView) { history.replaceState(null, '', location.pathname + location.search); [sheetView, sheetFromApp] = [null, false]; keepAwake(); }
   [tab, playerView, settingsFor, settingsDraft, newSetup] = ['evenements', null, id, null, null];
   render();
   document.querySelector('.settings')?.scrollIntoView({ block:'start' });
