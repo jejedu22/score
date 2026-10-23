@@ -321,8 +321,12 @@ test('tournoi : poule impaire, équipes exemptées au repos', async () => {
   for (let i = 0; i < 10; i += 2) await api.call('POST', `/api/events/${eventId}/teams`, { players: [ids[i], ids[i + 1]] });
   const { data } = await api.call('POST', `/api/events/${eventId}/tournament`, { groups: 1, koSize: 2 });
   assert.equal(data.games.length, 10);                                             // 5 équipes : 10 rencontres
-  assert.equal(new Set(data.games.map(g => g.round)).size, 5);                     // 5 tours, une équipe exemptée par tour
-  assert.equal(data.rests.length, 10);                                             // 2 joueurs × 5 tours
+  const rounds = [...new Set(data.games.map(g => g.round))];
+  assert.equal(rounds.length, 5);                                                  // 5 tours…
+  for (const r of rounds) {                                                        // …une équipe exemptée par tour
+    const playing = data.games.filter(g => g.round === r).flatMap(g => [g.teamA, g.teamB]);
+    assert.equal(data.teams.filter(t => !playing.includes(t.id)).length, 1);
+  }
 });
 
 test('réglages : validation, couleurs modifiables même clos, arrondi désactivable', async () => {
@@ -405,6 +409,67 @@ test('donnes : partie en nombre de donnes, égalité prolongée en phase finale'
   // Les poules sont figées : impossible d'annuler une donne de poule
   const groupGame = data.games.find(x => x.stage === 'group');
   assert.equal((await api.call('DELETE', `/api/games/${groupGame.id}/deals/last`)).status, 409);
+});
+
+test('joueurs par événement : création, réutilisation, ajout groupé, retrait', async () => {
+  const api = await start();
+  const e1 = await api.addEvent('Soirée 1');
+  const e2 = await api.addEvent('Soirée 2');
+  const enrol = (ev, body) => api.call('POST', `/api/events/${ev}/players`, body);
+  const roster = (data, ev) => data.roster.filter(r => r.eventId === ev).map(r => data.players.find(p => p.id === r.playerId).name).sort();
+  await enrol(e1, { name: 'Alice' });
+  let { data } = await enrol(e1, { name: '  Bob ' });
+  assert.deepEqual(roster(data, e1), ['Alice', 'Bob']);
+  assert.equal((await enrol(e1, { name: 'alice' })).status, 409);                 // déjà inscrite
+  // Même nom dans un autre événement : le joueur existant est réutilisé (pas de doublon)
+  ({ data } = await enrol(e2, { name: 'ALICE' }));
+  assert.equal(data.players.length, 2);
+  assert.deepEqual(roster(data, e2), ['Alice']);
+  // Ajout groupé de joueurs existants
+  const bob = data.players.find(p => p.name === 'Bob').id;
+  ({ data } = await enrol(e2, { ids: [bob] }));
+  assert.deepEqual(roster(data, e2), ['Alice', 'Bob']);
+  assert.equal((await enrol(e2, { ids: ['ffffffffff'] })).status, 400);
+  // Jouer inscrit automatiquement ; un joueur qui a joué ne peut pas être retiré
+  const [c, d] = [await api.addPlayer('Chloé'), await api.addPlayer('David')];
+  const alice = data.players.find(p => p.name === 'Alice').id;
+  ({ data } = await api.call('POST', '/api/games', { eventId: e1, a: [alice, bob], b: [c, d], sa: 100, sb: 50 }));
+  assert.deepEqual(roster(data, e1), ['Alice', 'Bob', 'Chloé', 'David']);
+  assert.equal((await api.call('DELETE', `/api/events/${e1}/players/${c}`)).status, 409);
+  ({ data } = await api.call('DELETE', `/api/events/${e2}/players/${bob}`));
+  assert.deepEqual(roster(data, e2), ['Alice']);
+  assert.equal(data.players.length, 4);                                            // le joueur existe toujours
+  // Supprimer un événement retire ses inscriptions
+  ({ data } = await api.call('DELETE', `/api/events/${e2}`));
+  assert.equal(data.roster.filter(r => r.eventId === e2).length, 0);
+});
+
+test('équipes sans joueurs : un nom suffit, matchs et tournoi', async () => {
+  const api = await start();
+  const eventId = (await api.call('POST', '/api/events', { name: 'Coupe', mode: 'team' })).data.created;
+  await api.call('PATCH', `/api/events/${eventId}`, { settings: { entry: 'deals', endType: 'rounds', endValue: 1, count: 'contract' } });
+  const addTeam = body => api.call('POST', `/api/events/${eventId}/teams`, body);
+  assert.equal((await addTeam({})).status, 400);                                  // ni nom ni joueurs
+  assert.equal((await addTeam({ name: '  ' })).status, 400);
+  for (const name of ['Les As', 'Les Rois', 'Les Dames', 'Les Valets']) assert.equal((await addTeam({ name })).status, 200);
+  const solo = await api.addPlayer('Alice');
+  let { data } = await addTeam({ name: 'Alice et un inconnu', players: [solo] });  // un seul joueur
+  assert.deepEqual(data.teams.at(-1).players, [solo, null]);
+  assert.ok(data.roster.some(r => r.eventId === eventId && r.playerId === solo));
+  const [t1, t2] = data.teams;
+  assert.deepEqual(t1.players, [null, null]);
+  // Match libre entre équipes sans joueurs, puis équipe occupée
+  ({ data } = await api.call('POST', '/api/games', { eventId, teamA: t1.id, teamB: t2.id }));
+  const g = data.games[0];
+  assert.deepEqual([g.a, g.b], [[null, null], [null, null]]);
+  const busy = await api.call('POST', '/api/games', { eventId, teamA: t1.id, teamB: data.teams[2].id });
+  assert.equal(busy.status, 409);
+  assert.match(busy.data.error, /Les As joue déjà à la table 1/);
+  ({ data } = await api.call('POST', `/api/games/${g.id}/deals`, { idx: 0, taker: 'a', contract: 100, made: true }));
+  assert.deepEqual([data.games[0].sa, data.games[0].sb], [100, 0]);
+  // Tournoi : 5 équipes, 1 poule, finale
+  ({ data } = await api.call('POST', `/api/events/${eventId}/tournament`, { groups: 1, koSize: 2 }));
+  assert.equal(data.games.filter(x => x.stage === 'group').length, 10);
 });
 
 test('suppression : joueur avec parties protégé', async () => {
