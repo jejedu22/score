@@ -1,6 +1,6 @@
 // Service worker : coquille de l'application en cache, dernier état connu disponible hors ligne.
-const CACHE = 'belote-v1';
-const SHELL = ['./', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'belote-v2';
+const SHELL = ['./', 'coinche.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

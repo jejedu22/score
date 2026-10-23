@@ -15,6 +15,25 @@ d'abord qu'un joueur rejoue avec un même partenaire (parties déjà jouées dan
 puis de retrouver les mêmes adversaires. Si le nombre de joueurs n'est pas un multiple de 4, les
 joueurs en trop se reposent à tour de rôle. Le tour suivant devient actif quand tous les scores du
 tour en cours sont saisis.
+
+À la création, un événement est **individuel** (partenaires différents à chaque partie, classement par
+joueur) ou **en équipes fixes** (paires inscrites au départ, classement par équipe). En équipes, on peut
+organiser un **tournoi** (`tournament.js`) : poules tirées au sort où chaque équipe rencontre toutes les
+autres, puis phase finale à élimination directe (16es, 8es, quarts, demies ou finale) avec les N premiers
+de chaque poule, croisés entre poules. Les tours de la phase finale s'enchaînent automatiquement ; pas
+d'égalité possible en phase finale.
+
+Un événement peut être **clos** : il passe en consultation seule (plus de saisie, correction ni
+planification) et peut être rouvert.
+
+**Réglages de partie** (onglet Événements → « Réglages ») : saisie du score final ou **donne par donne**
+(belote coinchée), fin de partie en points ou en nombre de donnes, décompte « enchère seule » ou
+« enchère + points faits » (points de la défense calculés automatiquement), arrondi à la dizaine,
+et jeu de couleurs propre à l'événement. Les règles de décompte sont dans `public/coinche.js`,
+partagé par le navigateur (aperçu de la donne) et le serveur (calcul enregistré) :
+contrats 80 à 160 et capot (250), coinche ×2, surcoinche ×4, belote +20 ; chute : la défense
+marque 160 + contrat. Plusieurs téléphones peuvent suivre et saisir la même partie : une donne
+saisie en double est refusée.
 Les données sont stockées dans SQLite côté serveur ; les terminaux se synchronisent toutes les 5 s.
 
 ## PWA
