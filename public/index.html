@@ -1061,18 +1061,22 @@ function viewEvents() {
 }
 // Réglages de partie d'un événement (un seul panneau ouvert à la fois)
 let settingsFor = null, settingsDraft = null;
+let newSetup = null;   // événement qui vient d'être créé : on règle d'abord ses paramètres
+const settingsOf = e => ({ entry:e.entry, endType:e.endType, endValue:String(e.endValue), count:e.count, rounding:e.rounding, theme:e.theme });
 function toggleSettings(id) {
-  const e = state.events.find(x => x.id === id);
   settingsFor = settingsFor === id ? null : id;
-  settingsDraft = e && { entry:e.entry, endType:e.endType, endValue:String(e.endValue), count:e.count, rounding:e.rounding, theme:e.theme };
+  settingsDraft = null;
+  newSetup = null;
   render();
 }
 function settingsPanel(e) {
-  const s = settingsDraft;
+  const s = settingsDraft ??= settingsOf(e);
+  const intro = newSetup === e.id ? `<h2 style="margin-top:0">Paramètres de « ${esc(e.name)} »</h2>
+    <p class="muted" style="margin-top:-4px">Choisissez comment se jouent les parties. Tout reste modifiable plus tard (bouton « Réglages »).</p>` : '';
   const seg = (key, options) => `<div class="seg">${options.map(([v, label]) =>
     `<button type="button" class="${s[key] === v ? 'on' : ''}" onclick="settingsDraft.${key}=${JSON.stringify(v).replace(/"/g, "'")};${key === 'endType' ? `settingsDraft.endValue='${v === 'rounds' ? 8 : 1000}';` : ''}render()">${label}</button>`).join('')}</div>`;
   const locked = isClosed(e);
-  return `<div class="settings">
+  return `<div class="settings">${intro}
     ${locked ? '<p class="muted" style="margin-top:0">Événement clos : seules les couleurs sont modifiables.</p>' : ''}
     <div class="field"><span>Saisie des scores</span>${seg('entry', [['total', 'Score final'], ['deals', 'Donne par donne']])}</div>
     ${s.entry === 'deals' ? `
@@ -1089,7 +1093,8 @@ function settingsPanel(e) {
     <div class="field"><span>Couleurs</span><div class="row" style="justify-content:flex-start;gap:10px">${Object.entries(THEMES).map(([k, c]) =>
       `<button type="button" class="swatch ${s.theme === k ? 'on' : ''}" style="background:${c}" aria-label="${k}" title="${k}"
         onclick="settingsDraft.theme='${k}';render()"></button>`).join('')}</div></div>
-    <button class="btn" onclick="saveSettings('${e.id}')">Enregistrer</button></div>`;
+    <div class="row"><button class="btn" onclick="saveSettings('${e.id}')">${newSetup === e.id ? 'Enregistrer et continuer' : 'Enregistrer'}</button>
+    ${newSetup === e.id ? '' : `<button class="link fit" onclick="toggleSettings('${e.id}')">Fermer</button>`}</div></div>`;
 }
 function saveSettings(id) {
   const s = settingsDraft;
@@ -1099,6 +1104,8 @@ function saveSettings(id) {
   act(async () => {
     await api('PATCH', 'events/' + id, { settings:body });
     settingsFor = null;
+    // Nouvel événement : étape suivante, inscrire les joueurs (individuel) ou former les équipes
+    if (newSetup === id) { tab = e.mode === 'team' ? 'partie' : 'joueurs'; newSetup = null; }
   });
 }
 
@@ -1110,8 +1117,10 @@ function addEvent(e) {
   act(async () => {
     const { created } = await api('POST', 'events', { name:v, mode });
     pickEvent(created);
-    tab = mode === 'team' ? 'partie' : 'classement';   // en équipes, on commence par former les paires
-  });
+    // On arrive sur les paramètres du nouvel événement
+    tab = 'evenements';
+    [settingsFor, settingsDraft, newSetup] = [created, null, created];
+  }).then(() => document.querySelector('.settings')?.scrollIntoView({ block:'start' }));
 }
 function openEvent(id) { pickEvent(id); tab = 'classement'; render(); }
 function renameEvent(id) {
