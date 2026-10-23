@@ -497,7 +497,7 @@ function dealForm(g, ev) {
       ? `<div class="field"><span>Points faits par le preneur (0 à 162, dix de der compris)</span>
         <input type="number" inputmode="numeric" min="0" max="162" value="${esc(d.points)}" aria-label="Points faits par le preneur"
           oninput="dealDraft['${g.id}'].points=this.value;dealPreview('${g.id}')"></div>`
-      : `<div class="field"><span>Contrat${ev.count === 'contract' ? ' (belote comprise pour l\'atteindre)' : ''}</span>${seg('made', [[true, 'Fait'], [false, 'Chuté']])}</div>`}
+      : `<div class="field"><span>Résultat${ev.count === 'contract' ? ' (belote comprise pour atteindre le contrat)' : ''}</span>${seg('made', [[true, 'Fait'], [false, 'Chuté']])}</div>`}
     <div class="preview" id="prev-${g.id}">${previewText(g, ev)}</div>
     <div class="err">${esc(d.err ?? '')}</div>
     <div class="row"><button class="btn" onclick="submitDeal('${g.id}')">Valider la donne</button>
