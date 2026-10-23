@@ -325,6 +325,88 @@ test('tournoi : poule impaire, équipes exemptées au repos', async () => {
   assert.equal(data.rests.length, 10);                                             // 2 joueurs × 5 tours
 });
 
+test('réglages : validation, couleurs modifiables même clos, arrondi désactivable', async () => {
+  const api = await start();
+  const [a, b, c, d] = await fourPlayers(api);
+  const eventId = await api.addEvent('Soirée');
+  const set = settings => api.call('PATCH', `/api/events/${eventId}`, { settings });
+  const ev0 = (await api.call('GET', '/api/state')).data.events[0];
+  assert.deepEqual([ev0.entry, ev0.endType, ev0.endValue, ev0.count, ev0.rounding, ev0.theme], ['total', 'points', 1000, 'points', true, 'vert']);
+  assert.equal((await set({ entry: 'autre' })).status, 400);
+  assert.equal((await set({ endType: 'rounds', endValue: 0 })).status, 400);
+  assert.equal((await set({ endType: 'points', endValue: 50 })).status, 400);
+  assert.equal((await set({ theme: 'rose' })).status, 400);
+  assert.equal((await set({ rounding: 'oui' })).status, 400);
+  const ok = await set({ entry: 'deals', endType: 'rounds', endValue: 8, count: 'contract', rounding: false, theme: 'bleu' });
+  const ev = ok.data.events[0];
+  assert.deepEqual([ev.entry, ev.endType, ev.endValue, ev.count, ev.rounding, ev.theme], ['deals', 'rounds', 8, 'contract', false, 'bleu']);
+  // Sans arrondi, un score total est gardé tel quel
+  const g = (await api.call('POST', '/api/games', { eventId, a: [a, b], b: [c, d], sa: 1275, sb: 984 })).data.games[0];
+  assert.deepEqual([g.sa, g.sb], [1275, 984]);
+  await api.call('PATCH', `/api/events/${eventId}`, { closed: true });
+  assert.equal((await set({ theme: 'violet' })).status, 200);                      // couleurs : oui
+  assert.equal((await set({ endValue: 6 })).status, 409);                          // règles : non
+});
+
+test('donnes : partie en points, double saisie, fin automatique, annulation', async () => {
+  const api = await start();
+  const [a, b, c, d] = await fourPlayers(api);
+  const eventId = await api.addEvent('Coinche');
+  await api.call('PATCH', `/api/events/${eventId}`, { settings: { entry: 'deals', endType: 'points', endValue: 500 } });
+  const g = (await api.call('POST', '/api/games', { eventId, a: [a, b], b: [c, d] })).data.games[0];
+  const deal = body => api.call('POST', `/api/games/${g.id}/deals`, body);
+  const game = data => data.games.find(x => x.id === g.id);
+
+  assert.equal((await deal({ idx: 0, taker: 'a', contract: 95, points: 100 })).status, 400);  // contrat invalide
+  let r = await deal({ idx: 0, taker: 'a', contract: 100, points: 107 });                    // A : 210, B : 50
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.data.deals.map(x => [x.idx, x.pa, x.pb, x.made]), [[0, 210, 50, true]]);
+  // Un autre téléphone qui n'a pas vu la donne 0 est refusé
+  assert.equal((await deal({ idx: 0, taker: 'b', contract: 80, points: 90 })).status, 409);
+  r = await deal({ idx: 1, taker: 'b', contract: 120, coinche: 2, points: 90, belote: 'a' });  // B chute coinché : A 160+240+20
+  assert.deepEqual(r.data.deals.at(-1).pa, 420);
+  assert.equal(game(r.data).sa, 630);                                                      // 630 ≥ 500 : partie finie
+  assert.deepEqual([game(r.data).sa, game(r.data).sb], [630, 50]);
+  assert.equal((await deal({ idx: 2, taker: 'a', contract: 80, points: 90 })).status, 409);  // partie terminée
+  // Annuler la dernière donne rouvre la partie
+  r = await api.call('DELETE', `/api/games/${g.id}/deals/last`);
+  assert.equal(game(r.data).sa, null);
+  assert.equal(r.data.deals.length, 1);
+});
+
+test('donnes : partie en nombre de donnes, égalité prolongée en phase finale', async () => {
+  const api = await start();
+  const ids = [];
+  for (let i = 0; i < 8; i++) ids.push(await api.addPlayer(`P${i}`));
+  const eventId = (await api.call('POST', '/api/events', { name: 'Coupe', mode: 'team' })).data.created;
+  await api.call('PATCH', `/api/events/${eventId}`, { settings: { entry: 'deals', endType: 'rounds', endValue: 2, count: 'contract' } });
+  for (let i = 0; i < 8; i += 2) await api.call('POST', `/api/events/${eventId}/teams`, { players: [ids[i], ids[i + 1]] });
+  let { data } = await api.call('POST', `/api/events/${eventId}/tournament`, { groups: 1, koSize: 2 });
+  const play = async (gameId, deals) => {
+    let res;
+    for (const [i, d] of deals.entries()) res = await api.call('POST', `/api/games/${gameId}/deals`, { idx: i, ...d });
+    return res.data;
+  };
+  // Poule : égalité admise après 2 donnes (A fait 100, puis B fait 100)
+  const tie = [{ taker: 'a', contract: 100, made: true }, { taker: 'b', contract: 100, made: true }];
+  for (const g of data.games.filter(x => x.stage === 'group')) {
+    const order = data.teams.map(t => t.id);
+    data = await play(g.id, order.indexOf(g.teamA) < order.indexOf(g.teamB) ? [...tie.slice(0, 1), { taker: 'a', contract: 80, made: true }] : tie);
+  }
+  assert.ok(data.games.filter(x => x.stage === 'group').every(x => x.sa !== null));
+  assert.ok(data.games.some(x => x.stage === 'group' && x.sa === x.sb));            // une égalité en poule
+  ({ data } = await api.call('POST', `/api/events/${eventId}/tournament/final`));
+  const final = data.games.find(x => x.stage === 'ko');
+  data = await play(final.id, tie);
+  assert.equal(data.games.find(x => x.id === final.id).sa, null);                   // 100 – 100 : on continue
+  ({ data } = await api.call('POST', `/api/games/${final.id}/deals`, { idx: 2, taker: 'a', contract: 80, made: true }));
+  const done = data.games.find(x => x.id === final.id);
+  assert.deepEqual([done.sa, done.sb], [180, 100]);
+  // Les poules sont figées : impossible d'annuler une donne de poule
+  const groupGame = data.games.find(x => x.stage === 'group');
+  assert.equal((await api.call('DELETE', `/api/games/${groupGame.id}/deals/last`)).status, 409);
+});
+
 test('suppression : joueur avec parties protégé', async () => {
   const api = await start();
   const [a, b, c, d] = await fourPlayers(api);

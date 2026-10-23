@@ -6,11 +6,13 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const planner = require('./planner');
 const tournament = require('./tournament');
+const coinche = require('./public/coinche');
 
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_SCORE = 100_000;
 const MAX_NAME = 40;
 const MAX_ROUNDS = 30;
+const THEMES = ['vert', 'bleu', 'bordeaux', 'violet', 'orange', 'ardoise'];
 
 const uid = () => crypto.randomBytes(5).toString('hex');
 const cleanName = v => String(v ?? '').trim().replace(/\s+/g, ' ').slice(0, MAX_NAME);
@@ -76,7 +78,24 @@ function openDb(dbPath) {
   addColumn('events', 'closed_at', 'INTEGER');
   addColumn('events', 'groups', 'INTEGER');    // tournoi : nombre de poules (NULL = pas de tournoi)
   addColumn('events', 'ko_size', 'INTEGER');   // tournoi : équipes au premier tour de la phase finale
+  // Réglages de partie : saisie du score final ou donne par donne, fin de partie, décompte, arrondi, couleurs
+  addColumn('events', 'entry', "TEXT NOT NULL DEFAULT 'total'");        // 'total' ou 'deals'
+  addColumn('events', 'end_type', "TEXT NOT NULL DEFAULT 'points'");    // 'points' ou 'rounds'
+  addColumn('events', 'end_value', 'INTEGER NOT NULL DEFAULT 1000');
+  addColumn('events', 'count_mode', "TEXT NOT NULL DEFAULT 'points'");  // 'contract' ou 'points'
+  addColumn('events', 'rounding', 'INTEGER NOT NULL DEFAULT 1');
+  addColumn('events', 'theme', "TEXT NOT NULL DEFAULT 'vert'");
   db.exec(`
+  -- Donnes d'une partie saisie donne par donne (points marqués calculés à la saisie)
+  CREATE TABLE IF NOT EXISTS deals (
+    game_id TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    idx INTEGER NOT NULL,
+    taker TEXT NOT NULL, contract INTEGER NOT NULL, coinche INTEGER NOT NULL, belote TEXT,
+    points INTEGER, made INTEGER NOT NULL,
+    pa INTEGER NOT NULL, pb INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (game_id, idx)
+  );
   -- Équipes fixes d'un événement en mode équipe
   CREATE TABLE IF NOT EXISTS teams (
     id TEXT PRIMARY KEY,
@@ -105,12 +124,12 @@ class HttpError extends Error {
 const round10 = n => Math.round(n / 10) * 10;
 const isId = v => typeof v === 'string' && /^[0-9a-f]{10}$/.test(v);
 
-// Scores tous deux vides → null (match en cours) ; sinon deux scores valides arrondis à 10
-function parseScores(body) {
+// Scores tous deux vides → null (match en cours) ; sinon deux scores valides (arrondis à 10 si demandé)
+function parseScores(body, rounding = true) {
   const empty = v => v === undefined || v === null || v === '';
   if (empty(body.sa) && empty(body.sb)) return null;
   if (empty(body.sa) || empty(body.sb)) throw new HttpError(400, 'Saisissez les deux scores');
-  const scores = [round10(Number(body.sa)), round10(Number(body.sb))];
+  const scores = [Number(body.sa), Number(body.sb)].map(n => (rounding ? round10(n) : n));
   if (!scores.every(n => Number.isInteger(n) && n >= 0 && n <= MAX_SCORE))
     throw new HttpError(400, `Scores invalides (entre 0 et ${MAX_SCORE})`);
   return scores;
@@ -158,7 +177,8 @@ function createApp(db) {
   // Les joueurs sont communs à tous les événements ; chaque partie appartient à un événement.
   function getState() {
     const events = db.prepare(`SELECT id, name, created_at AS createdAt, mode, closed_at AS closedAt,
-      groups, ko_size AS koSize FROM events ORDER BY created_at, rowid`).all();
+      groups, ko_size AS koSize, entry, end_type AS endType, end_value AS endValue, count_mode AS count,
+      rounding, theme FROM events ORDER BY created_at, rowid`).all().map(e => ({ ...e, rounding: !!e.rounding }));
     const players = db.prepare('SELECT id, name FROM players ORDER BY created_at, rowid').all();
     const games = db.prepare('SELECT * FROM games ORDER BY created_at, rowid').all()
       .map(g => ({ id: g.id, eventId: g.event_id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb,
@@ -167,7 +187,9 @@ function createApp(db) {
     const rests = db.prepare('SELECT event_id AS eventId, round, player_id AS playerId FROM rests ORDER BY round').all();
     const teams = db.prepare(`SELECT id, event_id AS eventId, name, p1, p2, grp FROM teams ORDER BY created_at, rowid`).all()
       .map(({ p1, p2, ...t }) => ({ ...t, players: [p1, p2] }));
-    return { events, players, games, rests, teams };
+    const deals = db.prepare(`SELECT game_id AS gameId, idx, taker, contract, coinche, belote, points, made, pa, pb
+      FROM deals ORDER BY game_id, idx`).all().map(d => ({ ...d, made: !!d.made }));
+    return { events, players, games, rests, teams, deals };
   }
 
   // Tour planifié en cours : le plus petit tour qui a encore des matchs sans score
@@ -200,6 +222,33 @@ function createApp(db) {
       extra.stage ?? null, extra.grp ?? null, extra.ko ?? null, extra.slot ?? null);
   };
   const winnerOf = g => (g.sa > g.sb ? g.team_a : g.team_b);
+  const scoring = ev => ({ count: ev.count_mode, rounding: !!ev.rounding });
+
+  // Un résultat qui contredirait la suite du tournoi (poules figées, vainqueur déjà qualifié) est refusé
+  function assertResultEditable(g, newScores) {
+    if (g.stage === 'group' && db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko'").get(g.event_id))
+      throw new HttpError(409, 'La phase finale a commencé : les résultats des poules sont figés.');
+    if (g.stage === 'ko' && g.sa !== null && db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko' AND ko = ?").get(g.event_id, g.ko / 2)
+      && (!newScores || (newScores[0] > newScores[1]) !== (g.sa > g.sb)))
+      throw new HttpError(409, 'Le tour suivant est déjà lancé : cette modification changerait le vainqueur.');
+  }
+
+  // Validation des réglages de partie (PATCH /api/events/:id)
+  function parseSettings(body, ev) {
+    const s = {
+      entry: body.entry ?? ev.entry, end_type: body.endType ?? ev.end_type, end_value: Number(body.endValue ?? ev.end_value),
+      count_mode: body.count ?? ev.count_mode, rounding: body.rounding ?? !!ev.rounding, theme: body.theme ?? ev.theme,
+    };
+    if (!['total', 'deals'].includes(s.entry)) throw new HttpError(400, 'Mode de saisie invalide');
+    if (!['points', 'rounds'].includes(s.end_type)) throw new HttpError(400, 'Fin de partie invalide');
+    const [min, max] = s.end_type === 'rounds' ? [1, 50] : [100, 10_000];
+    if (!Number.isInteger(s.end_value) || s.end_value < min || s.end_value > max)
+      throw new HttpError(400, s.end_type === 'rounds' ? `Nombre de donnes : entre ${min} et ${max}` : `Objectif : entre ${min} et ${max} points`);
+    if (!['contract', 'points'].includes(s.count_mode)) throw new HttpError(400, 'Décompte invalide');
+    if (typeof s.rounding !== 'boolean') throw new HttpError(400, 'Arrondi invalide');
+    if (!THEMES.includes(s.theme)) throw new HttpError(400, 'Couleurs invalides');
+    return { ...s, rounding: s.rounding ? 1 : 0 };
+  }
 
   // Phase finale : quand tous les matchs d'un tour sont joués, le tour suivant est créé
   function advanceKnockout(eventId, ko) {
@@ -248,6 +297,15 @@ function createApp(db) {
           db.prepare('UPDATE events SET closed_at = ? WHERE id = ?').run(Date.now(), ev.id);
         }
         if (body.closed === false) db.prepare('UPDATE events SET closed_at = NULL WHERE id = ?').run(ev.id);
+        if (body.settings !== undefined) {
+          if (typeof body.settings !== 'object' || body.settings === null) throw new HttpError(400, 'Réglages invalides');
+          const s = parseSettings(body.settings, ev);
+          // Les couleurs restent modifiables sur un événement clos, pas les règles de partie
+          const rulesChanged = ['entry', 'end_type', 'end_value', 'count_mode', 'rounding'].some(k => s[k] !== ev[k]);
+          if (rulesChanged) assertOpen(getEvent(ev.id));
+          db.prepare(`UPDATE events SET entry = ?, end_type = ?, end_value = ?, count_mode = ?, rounding = ?, theme = ?
+            WHERE id = ?`).run(s.entry, s.end_type, s.end_value, s.count_mode, s.rounding, s.theme, ev.id);
+        }
       });
       return getState();
     },
@@ -464,7 +522,7 @@ function createApp(db) {
       if (!ids.every(isId) || new Set(ids).size !== 4) throw new HttpError(400, 'Il faut 4 joueurs différents');
       const known = db.prepare(`SELECT COUNT(*) AS n FROM players WHERE id IN (${ids.map(() => '?').join()})`).get(...ids).n;
       if (known !== 4) throw new HttpError(400, 'Joueur inconnu (supprimé depuis un autre appareil ?)');
-      const scores = parseScores(body);
+      const scores = parseScores(body, !!ev.rounding);
       const now = Date.now();
       transaction(() => {
         // Un joueur ne peut pas être à deux tables à la fois : matchs ajoutés à la main en cours
@@ -491,11 +549,11 @@ function createApp(db) {
     },
 
     'PATCH /api/games/:id': ({ params, body }) => {
-      const scores = parseScores(body);
-      if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
       const g = db.prepare('SELECT * FROM games WHERE id = ?').get(params.id);
       if (!g) throw new HttpError(404, 'Match introuvable (annulé depuis un autre appareil ?)');
-      assertOpen(getEvent(g.event_id));
+      const ev = assertOpen(getEvent(g.event_id));
+      const scores = parseScores(body, !!ev.rounding);
+      if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
       if (g.stage === 'ko' && scores[0] === scores[1]) throw new HttpError(400, "Pas d'égalité en phase finale : il faut un vainqueur.");
       transaction(() => {
         const done = db.prepare('UPDATE games SET sa = ?, sb = ?, finished_at = ? WHERE id = ? AND sa IS NULL')
@@ -509,24 +567,59 @@ function createApp(db) {
     // Correction d'une partie déjà validée. `from` = score affiché lors de la correction :
     // si un autre terminal l'a changé entre-temps, on refuse plutôt que d'écraser sa correction.
     'PUT /api/games/:id/score': ({ params, body }) => {
-      const scores = parseScores(body);
-      if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
       const g = gameOf(params.id);
-      assertOpen(getEvent(g.event_id));
+      const ev = assertOpen(getEvent(g.event_id));
+      const scores = parseScores(body, !!ev.rounding);
+      if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
       if (g.sa === null) throw new HttpError(409, "Ce match n'est pas terminé : saisissez son score dans l'onglet Partie.");
+      if (g.stage === 'ko' && scores[0] === scores[1]) throw new HttpError(400, "Pas d'égalité en phase finale : il faut un vainqueur.");
       // Tournoi : une correction ne doit pas contredire la suite déjà générée
-      if (g.stage === 'group' && db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko'").get(g.event_id))
-        throw new HttpError(409, 'La phase finale a commencé : les résultats des poules sont figés.');
-      if (g.stage === 'ko') {
-        if (scores[0] === scores[1]) throw new HttpError(400, "Pas d'égalité en phase finale : il faut un vainqueur.");
-        const nextExists = db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko' AND ko = ?").get(g.event_id, g.ko / 2);
-        if (nextExists && (scores[0] > scores[1]) !== (g.sa > g.sb))
-          throw new HttpError(409, 'Le tour suivant est déjà lancé : cette correction changerait le vainqueur.');
-      }
+      assertResultEditable(g, scores);
       const from = body.from;
       if (!Array.isArray(from) || from[0] !== g.sa || from[1] !== g.sb)
         throw new HttpError(409, `Le score a été modifié entre-temps (${g.sa} – ${g.sb}) : vérifiez avant de corriger.`);
       db.prepare('UPDATE games SET sa = ?, sb = ? WHERE id = ?').run(...scores, params.id);
+      return getState();
+    },
+
+    // Saisie donne par donne. `idx` = nombre de donnes connues du terminal : si une autre donne a été
+    // saisie entre-temps (autre téléphone à la même table), on refuse plutôt que de la doubler.
+    'POST /api/games/:id/deals': ({ params, body }) => {
+      const g = gameOf(params.id);
+      const ev = assertOpen(getEvent(g.event_id));
+      if (g.sa !== null) throw new HttpError(409, 'Cette partie est terminée.');
+      const count = db.prepare('SELECT COUNT(*) AS n FROM deals WHERE game_id = ?').get(g.id).n;
+      if (body.idx !== count) throw new HttpError(409, 'Une donne vient d\'être saisie sur un autre appareil : vérifiez le score avant de continuer.');
+      const deal = { taker: body.taker, contract: Number(body.contract), coinche: Number(body.coinche ?? 1), belote: body.belote ?? null,
+        points: body.points === undefined || body.points === null || body.points === '' ? null : Number(body.points), made: body.made };
+      const settings = scoring(ev);
+      const err = coinche.checkDeal(deal, settings);
+      if (err) throw new HttpError(400, err);
+      const { pa, pb, made } = coinche.scoreDeal(deal, settings);
+      transaction(() => {
+        db.prepare(`INSERT INTO deals (game_id, idx, taker, contract, coinche, belote, points, made, pa, pb, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(g.id, count, deal.taker, deal.contract, deal.coinche, deal.belote,
+          deal.contract === coinche.CAPOT || settings.count === 'contract' ? null : deal.points, made ? 1 : 0, pa, pb, Date.now());
+        const { sa, sb, n } = db.prepare('SELECT SUM(pa) AS sa, SUM(pb) AS sb, COUNT(*) AS n FROM deals WHERE game_id = ?').get(g.id);
+        if (coinche.isOver(sa, sb, n, { type: ev.end_type, value: ev.end_value }, g.stage === 'ko')) {
+          db.prepare('UPDATE games SET sa = ?, sb = ?, finished_at = ? WHERE id = ?').run(sa, sb, Date.now(), g.id);
+          if (g.stage === 'ko') advanceKnockout(g.event_id, g.ko);
+        }
+      });
+      return getState();
+    },
+
+    // Annule la dernière donne (erreur de saisie) ; si elle avait terminé la partie, la partie reprend
+    'DELETE /api/games/:id/deals/last': ({ params }) => {
+      const g = gameOf(params.id);
+      assertOpen(getEvent(g.event_id));
+      const last = db.prepare('SELECT MAX(idx) AS i FROM deals WHERE game_id = ?').get(g.id).i;
+      if (last === null) throw new HttpError(409, 'Aucune donne à annuler.');
+      if (g.sa !== null) assertResultEditable(g, null);
+      transaction(() => {
+        db.prepare('DELETE FROM deals WHERE game_id = ? AND idx = ?').run(g.id, last);
+        db.prepare('UPDATE games SET sa = NULL, sb = NULL, finished_at = NULL WHERE id = ?').run(g.id);
+      });
       return getState();
     },
 
