@@ -48,7 +48,8 @@
   body.busy button { opacity:.5; pointer-events:none; }
   .eventbar { margin-bottom:12px; }
   .eventbar select { background:var(--card); font-weight:600; }
-  .actions { display:flex; gap:2px; flex:0 0 auto; }
+  .actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px; flex:0 1 auto; }
+  .game > div:first-child { min-width:0; }
   button.link { background:transparent; color:var(--accent); border:0; font:inherit; padding:6px; }
   .match { border-left:4px solid var(--accent); }
   .match h2 { display:flex; justify-content:space-between; align-items:center; }
@@ -70,6 +71,10 @@
   details[open] > summary::before { content:'▾ '; }
   .ok { color:var(--accent); font-size:14px; }
   .upcoming .game { font-size:14px; }
+  .closed { border-color:var(--muted); color:var(--muted); font-size:14px; }
+  .champion { font-size:18px; border:2px solid var(--accent); }
+  tr.qualif td { background:color-mix(in srgb, var(--accent) 10%, transparent); }
+  .badge { font-size:12px; font-weight:600; border:1px solid var(--line); border-radius:6px; padding:1px 6px; color:var(--muted); }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
@@ -84,11 +89,11 @@
 <main id="app"></main>
 
 <script>
-let state = { events:[], players:[], games:[], rests:[] };
+let state = { events:[], players:[], games:[], rests:[], teams:[] };
 const EVENT_KEY = 'belote-evenement';
 let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
-let playerView = null;
+let playerView = null;   // id du joueur dont la fiche est affichée (par-dessus l'onglet courant)
 // Tri du tableau de classement (mémorisé sur l'appareil) ; 'rank' = classement officiel
 const SORT_KEY = 'belote-tri';
 const SORTS = {
@@ -107,8 +112,8 @@ function sortRanking(key) {
   sort = sort.key === key ? { key, dir:-sort.dir } : { key, dir:SORTS[key].first };
   try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch {}
   render();
-}   // id du joueur dont la fiche est affichée (par-dessus l'onglet courant)
-let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+}
+let draft = { a1:'', a2:'', b1:'', b2:'', ta:'', tb:'', sa:'', sb:'', err:'' };
 // Scores en cours de saisie pour les matchs en cours, par id (survivent aux rafraîchissements)
 let scoreDraft = {};
 // Corrections de parties validées en cours d'édition, par id : { sa, sb, from:[sa, sb], err }
@@ -162,7 +167,7 @@ function currentEvent() {
 function pickEvent(id) {
   eventId = id;
   try { localStorage.setItem(EVENT_KEY, id); } catch {}
-  draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
+  draft = { a1:'', a2:'', b1:'', b2:'', ta:'', tb:'', sa:'', sb:'', err:'' };
   render();
 }
 const eventGames = ev => state.games.filter(g => g.eventId === ev?.id);
@@ -179,9 +184,31 @@ function pendingGames(ev) {
   return eventGames(ev).filter(g => isPending(g) && (g.round === null || g.round === round))
     .sort((x, y) => (x.round ?? Infinity) - (y.round ?? Infinity) || x.table - y.table);
 }
-const restsOf = (ev, round) => state.rests.filter(r => r.eventId === ev.id && r.round === round).map(r => name(r.playerId));
-const tableLabel = g => g.round ? `Tour ${g.round} · Table ${g.table}` : `Table ${g.table}`;
+const isTeamEvent = ev => ev?.mode === 'team';
+const isClosed = ev => !!ev?.closedAt;
+const eventTeams = ev => state.teams.filter(t => t.eventId === ev?.id).sort(byName);
+const teamOf = id => state.teams.find(t => t.id === id);
+// Joueurs au repos ; en mode équipe on affiche l'équipe exemptée
+function restsOf(ev, round) {
+  const ids = state.rests.filter(r => r.eventId === ev.id && r.round === round).map(r => r.playerId);
+  if (!isTeamEvent(ev)) return ids.map(name);
+  return [...new Set(ids.map(id => eventTeams(ev).find(t => t.players.includes(id))?.name ?? name(id)))];
+}
+const KO_NAMES = { 32:'16e de finale', 16:'8e de finale', 8:'Quart de finale', 4:'Demi-finale', 2:'Finale' };
+const groupName = i => `Poule ${String.fromCharCode(65 + i)}`;
+function tableLabel(g) {
+  if (g.stage === 'ko') return g.ko > 2 ? `${KO_NAMES[g.ko]} · Match ${g.slot + 1}` : KO_NAMES[g.ko];
+  if (g.stage === 'group') return `${groupName(g.grp)} · Tour ${g.round} · Table ${g.table}`;
+  return g.round ? `Tour ${g.round} · Table ${g.table}` : `Table ${g.table}`;
+}
 const teamNames = ids => esc(ids.map(name).join(' & '));
+// Joueurs d'une équipe, seulement si son nom ne les cite pas déjà (nom par défaut « A & B »)
+const teamPlayers = (t, wrap) => (t.name === t.players.map(name).join(' & ') ? '' : wrap(teamNames(t.players)));
+// Un camp d'une partie : nom de l'équipe fixe (mode équipe) ou noms des deux joueurs
+function side(g, k) {
+  const team = teamOf(k === 'a' ? g.teamA : g.teamB);
+  return team ? `${esc(team.name)}` : teamNames(k === 'a' ? g.a : g.b);
+}
 const fmtDate = t => new Date(t).toLocaleDateString('fr-FR', { day:'numeric', month:'short', year:'numeric' });
 
 function stats(games) {   // parties terminées uniquement
@@ -197,6 +224,18 @@ function stats(games) {   // parties terminées uniquement
   }
   // Classement : victoires d'abord, puis points
   return Object.values(s).filter(p => p.games).sort((x, y) => y.wins - x.wins || y.pts - x.pts || byName(x, y));
+}
+
+function teamStats(ev, games) {
+  const s = Object.fromEntries(eventTeams(ev).map(t => [t.id, { id:t.id, name:t.name, players:t.players, pts:0, games:0, wins:0, diff:0 }]));
+  for (const g of games) {
+    for (const [t, mine, theirs] of [[g.teamA, g.sa, g.sb], [g.teamB, g.sb, g.sa]]) {
+      if (!s[t]) continue;
+      s[t].pts += mine; s[t].games++; s[t].diff += mine - theirs;
+      if (mine > theirs) s[t].wins++;
+    }
+  }
+  return Object.values(s);
 }
 
 // Rangs avec ex aequo (mêmes victoires et points) : même rang, le suivant est décalé (1, 2, 2, 4)
@@ -222,41 +261,94 @@ function eventBar() {
   const ev = currentEvent();
   if (!ev) return '';
   const opts = eventsRecentFirst().map(e =>
-    `<option value="${e.id}" ${e.id === ev.id ? 'selected' : ''}>${esc(e.name)} · ${fmtDate(e.createdAt)}</option>`).join('');
+    `<option value="${e.id}" ${e.id === ev.id ? 'selected' : ''}>${esc(e.name)} · ${fmtDate(e.createdAt)}${isClosed(e) ? ' · clos' : ''}</option>`).join('');
   return `<div class="eventbar"><select onchange="pickEvent(this.value)" aria-label="Événement">${opts}</select></div>`;
 }
 const noEvent = () => `<div class="card muted">Créez d'abord un événement dans l'onglet « Événements ».</div>`;
+
+function closedBanner(ev) {
+  return isClosed(ev) ? `<div class="card closed">🔒 Événement clos le ${fmtDate(ev.closedAt)} : consultation seule.
+    Il peut être rouvert dans l'onglet « Événements ».</div>` : '';
+}
+
+// Tableau de classement triable : joueurs (fiche cliquable) ou équipes
+function rankingTable(rows, { title, label, onRow, note }) {
+  const { value } = SORTS[sort.key];
+  const cmp = sort.key === 'name' ? byName : (x, y) => value(x) - value(y);
+  const ranked = withRanks(rows).sort((x, y) => sort.dir * cmp(x, y) || x.rank - y.rank || byName(x, y));
+  const body = ranked.map(({ rank, ...p }) => {
+    const lead = rank === 1 ? 'win' : '';
+    const who = onRow ? `<button class="name">${esc(p.name)}</button>`
+      : `${esc(p.name)}${p.players ? teamPlayers(p, x => `<br><span class="muted">${x}</span>`) : ''}`;
+    return `<tr${onRow ? ` class="clickable" onclick="${onRow}('${p.id}')"` : ''}><td class="rank">${rank}</td><td>${who}</td>
+    <td>${p.games}</td><td class="${lead}"><b>${p.wins}</b></td><td class="${lead}">${p.pts}</td></tr>`;
+  }).join('');
+  const head = Object.entries(SORTS).map(([key, s]) => {
+    const on = sort.key === key;
+    const aria = on ? ` aria-sort="${sort.dir === 1 ? 'ascending' : 'descending'}"` : '';
+    return `<th${aria}><button class="sort" onclick="sortRanking('${key}')">${key === 'name' ? label : s.label}${on ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}</button></th>`;
+  }).join('');
+  return `<div class="card"><h2>${title}</h2><table><tr>${head}</tr>${body}</table><p class="muted">${note}</p></div>`;
+}
+
+// Classement d'une poule : victoires, points, écart (comme le serveur pour les qualifications)
+function groupStandings(ev, g) {
+  const teams = eventTeams(ev).filter(t => t.grp === g);
+  const games = finishedGames(ev).filter(x => x.stage === 'group' && x.grp === g);
+  return teamStats(ev, games).filter(t => teams.some(x => x.id === t.id))
+    .sort((x, y) => y.wins - x.wins || y.pts - x.pts || y.diff - x.diff);
+}
+function groupCards(ev) {
+  const perGroup = ev.koSize / ev.groups;
+  return Array.from({ length: ev.groups }, (_, g) => {
+    const rows = groupStandings(ev, g).map((t, i) => `<tr class="${i < perGroup ? 'qualif' : ''}"><td class="rank">${i + 1}</td>
+      <td>${esc(t.name)}${teamPlayers(t, x => `<br><span class="muted">${x}</span>`)}</td><td>${t.games}</td><td><b>${t.wins}</b></td>
+      <td>${t.pts}</td><td>${t.diff > 0 ? '+' : ''}${t.diff}</td></tr>`).join('');
+    return `<div class="card"><h2>${groupName(g)}</h2><table><tr><th>#</th><th>Équipe</th><th>J</th><th>V</th><th>Pts</th><th>Écart</th></tr>${rows}</table></div>`;
+  }).join('') + `<p class="muted" style="margin-top:-4px">Surlignées : places qualificatives (${perGroup} par poule). Départage : victoires, points, puis écart.</p>`;
+}
+function bracketCard(ev) {
+  const ko = eventGames(ev).filter(g => g.stage === 'ko');
+  if (!ko.length) return '';
+  const sizes = [...new Set(ko.map(g => g.ko))].sort((x, y) => y - x);
+  const final = ko.find(g => g.ko === 2 && !isPending(g));
+  const champion = final && teamOf(final.sa > final.sb ? final.teamA : final.teamB);
+  return (champion ? `<div class="card champion">🏆 Vainqueur : <b>${esc(champion.name)}</b>
+      ${teamPlayers(champion, x => `<span class="muted">(${x})</span>`)}</div>` : '')
+    + `<div class="card"><h2>Phase finale</h2>${sizes.map(size => `<p style="margin:10px 0 2px"><b>${KO_NAMES[size]}${size > 2 ? 's' : ''}</b></p>`
+      + ko.filter(g => g.ko === size).sort((x, y) => x.slot - y.slot).map(g => isPending(g)
+        ? `<div class="game"><span>${side(g, 'a')} <span class="muted">contre</span> ${side(g, 'b')}</span><span class="tag">à jouer</span></div>`
+        : `<div class="game"><span><span class="${g.sa > g.sb ? 'win' : ''}">${side(g, 'a')} ${g.sa}</span> – <span class="${g.sb > g.sa ? 'win' : ''}">${g.sb} ${side(g, 'b')}</span></span></div>`
+      ).join('')).join('')}</div>`;
+}
 
 function viewRanking() {
   const ev = currentEvent();
   if (!ev) return noEvent();
   const games = finishedGames(ev);
-  const st = stats(games);
   const pending = pendingGames(ev);
   const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
-      <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">${tableLabel(g)}</span></div>`).join('')}</div>` : '';
-  if (!st.length) return live + `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
-  const { value } = SORTS[sort.key];
-  const cmp = sort.key === 'name' ? (x, y) => byName(x, y) : (x, y) => value(x) - value(y);
-  const ranked = withRanks(st).sort((x, y) => sort.dir * cmp(x, y) || x.rank - y.rank || byName(x, y));
-  const rows = ranked.map(({ rank, ...p }) => {
-    const lead = rank === 1 ? 'win' : '';
-    return `<tr class="clickable" onclick="showPlayer('${p.id}')"><td class="rank">${rank}</td><td><button class="name">${esc(p.name)}</button></td>
-    <td>${p.games}</td><td class="${lead}"><b>${p.wins}</b></td><td class="${lead}">${p.pts}</td></tr>`;
-  }).join('');
+      <div>${side(g, 'a')}<br>${side(g, 'b')}</div><span class="tag">${tableLabel(g)}</span></div>`).join('')}</div>` : '';
+  let main = '';
+  if (isTeamEvent(ev)) {
+    if (ev.groups) main += bracketCard(ev) + groupCards(ev);
+    const st = teamStats(ev, games).filter(t => t.games).sort((x, y) => y.wins - x.wins || y.pts - x.pts || byName(x, y));
+    if (st.length) main += rankingTable(st, { title: ev.groups ? 'Bilan des équipes (tout le tournoi)' : 'Classement par équipe',
+      label: 'Équipe', note: 'Rang : victoires, puis points. Touchez un en-tête pour trier.' });
+  } else {
+    const st = stats(games);
+    if (st.length) main += rankingTable(st, { title: 'Classement individuel', label: 'Joueur', onRow: 'showPlayer',
+      note: 'Rang : victoires, puis points. Touchez un en-tête pour trier, un joueur pour voir ses parties.' });
+  }
+  if (!games.length && !ev.groups) main += `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
   const history = [...games].reverse().map(g => fix[g.id] ? fixRow(g) : `<div class="game">
-      <div><span class="${g.sa > g.sb ? 'win' : ''}">${teamNames(g.a)} <b>${g.sa}</b></span><br>
-      <span class="${g.sb > g.sa ? 'win' : ''}">${teamNames(g.b)} <b>${g.sb}</b></span></div>
-      <div class="actions"><button class="link" onclick="startFix('${g.id}')">Corriger</button>
-      <button class="ghost" onclick="delGame('${g.id}')">Suppr.</button></div></div>`).join('');
-  return live + `<div class="card"><h2>Classement individuel</h2>
-    <table><tr>${Object.entries(SORTS).map(([key, { label }]) => {
-      const on = sort.key === key;
-      const aria = on ? ` aria-sort="${sort.dir === 1 ? 'ascending' : 'descending'}"` : '';
-      return `<th${aria}><button class="sort" onclick="sortRanking('${key}')">${label}${on ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''}</button></th>`;
-    }).join('')}</tr>${rows}</table>
-    <p class="muted">Rang : victoires, puis points. Touchez un en-tête pour trier, un joueur pour voir ses parties.</p></div>
-    <div class="card"><h2>Historique (${games.length})</h2>${history}</div>`;
+      <div>${g.stage ? `<span class="muted" style="font-size:13px">${tableLabel(g)}</span><br>` : ''}
+      <span class="${g.sa > g.sb ? 'win' : ''}">${side(g, 'a')} <b>${g.sa}</b></span><br>
+      <span class="${g.sb > g.sa ? 'win' : ''}">${side(g, 'b')} <b>${g.sb}</b></span></div>
+      ${isClosed(ev) ? '' : `<div class="actions"><button class="link" onclick="startFix('${g.id}')">Corriger</button>
+      ${g.stage ? '' : `<button class="ghost" onclick="delGame('${g.id}')">Suppr.</button>`}</div>`}</div>`).join('');
+  return closedBanner(ev) + live + main
+    + (games.length ? `<div class="card"><h2>Historique (${games.length})</h2>${history}</div>` : '');
 }
 
 function select(field, label, atTable) {
@@ -271,20 +363,20 @@ function select(field, label, atTable) {
 function viewGame() {
   const ev = currentEvent();
   if (!ev) return noEvent();
-  if (state.players.length < 4) return `<div class="card muted">Il faut au moins 4 joueurs.</div>`;
+  if (isClosed(ev)) return closedBanner(ev);
   const pending = pendingGames(ev);
+  const round = currentRound(ev);
+  const resting = round ? restsOf(ev, round) : [];
+  const restNote = resting.length ? `<p class="muted">${isTeamEvent(ev) ? 'Exemptée' + (resting.length > 1 ? 's' : '') : 'Au repos'}
+    au tour ${round} : ${esc(resting.join(', '))}</p>` : '';
+  const header = (pending.length ? `<h2>Matchs en cours (${pending.length})</h2>` : '') + restNote + matchCards(pending);
+  if (isTeamEvent(ev)) return ev.groups
+    ? header + viewUpcoming(ev, round) + viewTournament(ev) + viewTeams(ev)
+    : viewTeams(ev) + header + teamMatchForm(ev, pending) + viewTournament(ev);   // d'abord former les équipes
+  if (state.players.length < 4) return header + `<div class="card muted">Il faut au moins 4 joueurs.</div>`;
   const atTable = {};
   for (const g of pending) for (const id of [...g.a, ...g.b]) atTable[id] = g.table;
   const free = state.players.length - Object.keys(atTable).length;
-  const scoreInput = (g, k, team) => `<input type="number" inputmode="numeric" min="0" step="10" placeholder="Points"
-    aria-label="Points ${team} table ${g.table}" value="${scoreDraft[g.id]?.[k] ?? ''}"
-    oninput="setScoreDraft('${g.id}','${k}',this.value)" onchange="this.value=setScoreDraft('${g.id}','${k}',r10(this.value))">`;
-  const matches = pending.map(g => `<div class="card match"><h2><span>${tableLabel(g)}</span>
-      <button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button></h2>
-      <div class="side"><span>${teamNames(g.a)}</span>${scoreInput(g, 'sa', 'équipe A')}</div>
-      <div class="side"><span>${teamNames(g.b)}</span>${scoreInput(g, 'sb', 'équipe B')}</div>
-      <div class="err">${esc(scoreDraft[g.id]?.err ?? '')}</div>
-      <button class="btn" onclick="finishGame('${g.id}')">Valider le score</button></div>`).join('');
   const form = free < 4
     ? `<div class="card muted">Moins de 4 joueurs libres : saisissez un score pour en libérer, ou ajoutez des joueurs.</div>`
     : `<div class="card"><h2>Nouveau match</h2>
@@ -298,12 +390,172 @@ function viewGame() {
     Les scores sont arrondis à la dizaine (ex. 1275 → 1280).</p>
     <div class="err">${esc(draft.err)}</div>
     <button class="btn" onclick="addGame()">Enregistrer</button></div>`;
-  const round = currentRound(ev);
-  const resting = round ? restsOf(ev, round) : [];
-  const restNote = resting.length ? `<p class="muted">Au repos au tour ${round} : ${esc(resting.join(', '))}</p>` : '';
-  return (pending.length ? `<h2>Matchs en cours (${pending.length})</h2>` : '') + restNote + matches
-    + viewUpcoming(ev, round) + viewPlanner(ev) + form;
+  return header + viewUpcoming(ev, round) + viewPlanner(ev) + form;
 }
+
+// Cartes de saisie des matchs en cours (les matchs du tournoi ne s'annulent pas un par un)
+function matchCards(pending) {
+  const scoreInput = (g, k, team) => `<input type="number" inputmode="numeric" min="0" step="10" placeholder="Points"
+    aria-label="Points ${team} ${tableLabel(g)}" value="${scoreDraft[g.id]?.[k] ?? ''}"
+    oninput="setScoreDraft('${g.id}','${k}',this.value)" onchange="this.value=setScoreDraft('${g.id}','${k}',r10(this.value))">`;
+  return pending.map(g => `<div class="card match"><h2><span>${tableLabel(g)}</span>
+      ${g.stage ? '' : `<button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button>`}</h2>
+      <div class="side"><span>${side(g, 'a')}</span>${scoreInput(g, 'sa', 'équipe A')}</div>
+      <div class="side"><span>${side(g, 'b')}</span>${scoreInput(g, 'sb', 'équipe B')}</div>
+      <div class="err">${esc(scoreDraft[g.id]?.err ?? '')}</div>
+      <button class="btn" onclick="finishGame('${g.id}')">Valider le score</button></div>`).join('');
+}
+
+// --- Mode équipe ---
+let teamDraft = { p1:'', p2:'', name:'' };
+let tourDraft = { groups:'2', koSize:'4' };
+
+function viewTeams(ev) {
+  const teams = eventTeams(ev);
+  const locked = !!ev.groups;
+  const list = teams.map(t => `<div class="game"><div><b>${esc(t.name)}</b>${t.grp !== null ? ` <span class="badge">${groupName(t.grp)}</span>` : ''}
+      ${teamPlayers(t, x => `<br><span class="muted">${x}</span>`)}</div>
+      <div class="actions"><button class="link" onclick="renameTeam('${t.id}')">Renommer</button>
+      ${locked ? '' : `<button class="ghost" onclick="removeTeam('${t.id}')">Retirer</button>`}</div></div>`).join('');
+  const taken = new Set(teams.flatMap(t => t.players));
+  const pick = (k, other) => `<select onchange="teamDraft.${k}=this.value" aria-label="Joueur ${k === 'p1' ? 1 : 2}">
+    <option value="">Joueur ${k === 'p1' ? 1 : 2}</option>${sortedPlayers().filter(p => !taken.has(p.id)).map(p =>
+      `<option value="${p.id}" ${teamDraft[k] === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`;
+  const form = locked ? '<p class="muted">Le tournoi est lancé : les équipes sont figées.</p>'
+    : `<div class="grid2" style="margin-top:8px">${pick('p1')}${pick('p2')}</div>
+      <div class="row" style="margin-top:8px"><input placeholder="Nom de l'équipe (facultatif)" aria-label="Nom de l'équipe" maxlength="40"
+        value="${esc(teamDraft.name)}" oninput="teamDraft.name=this.value">
+      <button class="btn fit" onclick="addTeam()">Ajouter</button></div>`;
+  return `<div class="card"><h2>Équipes (${teams.length})</h2>${list || '<p class="muted">Aucune équipe : formez les paires ci-dessous.</p>'}${form}</div>`;
+}
+
+function teamMatchForm(ev, pending) {
+  if (ev.groups) return '';
+  const teams = eventTeams(ev);
+  if (teams.length < 2) return '';
+  const busy = {};
+  for (const g of pending) for (const t of [g.teamA, g.teamB]) busy[t] = g.table;
+  const pick = k => `<select onchange="draft.${k}=this.value;render()" aria-label="Équipe ${k === 'ta' ? 'A' : 'B'}">
+    <option value="">Équipe ${k === 'ta' ? 'A' : 'B'}</option>${teams.map(t => {
+      const other = draft[k === 'ta' ? 'tb' : 'ta'];
+      return `<option value="${t.id}" ${draft[k] === t.id ? 'selected' : ''} ${busy[t.id] || other === t.id ? 'disabled' : ''}>${esc(t.name)}${busy[t.id] ? ` (table ${busy[t.id]})` : ''}</option>`;
+    }).join('')}</select>`;
+  const score = (k, l) => `<input type="number" inputmode="numeric" min="0" step="10" placeholder="Points ${l}" aria-label="Points équipe ${l}"
+    value="${draft[k]}" oninput="draft.${k}=this.value" onchange="draft.${k}=this.value=r10(this.value)">`;
+  return `<div class="card"><h2>Match libre</h2><div class="grid2">
+    <div class="team">${pick('ta')}${score('sa', 'A')}</div><div class="team">${pick('tb')}${score('sb', 'B')}</div></div>
+    <p class="muted">Laissez les scores vides pour lancer le match et saisir le score à la fin.</p>
+    <div class="err">${esc(draft.err)}</div><button class="btn" onclick="addTeamGame()">Enregistrer</button></div>`;
+}
+
+// Mêmes règles que le serveur (tournament.checkConfig), pour guider avant l'envoi
+function tourCheck(n, groups, koSize) {
+  if (!Number.isInteger(groups) || groups < 1 || groups > 16) return 'Nombre de poules : entre 1 et 16.';
+  if (koSize % groups) return `${koSize} équipes qualifiées ne se répartissent pas entre ${groups} poules.`;
+  const perGroup = koSize / groups, smallest = Math.floor(n / groups);
+  if (smallest < 2) return `Il faut au moins 2 équipes par poule, soit ${2 * groups} équipes.`;
+  if (smallest < perGroup) return `${perGroup} qualifiées par poule demandent au moins ${perGroup * groups} équipes.`;
+  return null;
+}
+
+function viewTournament(ev) {
+  const reset = `<button class="ghost" style="padding-left:0" onclick="resetTournament()">Réinitialiser le tournoi</button>`;
+  if (!ev.groups) {
+    const n = eventTeams(ev).length;
+    const groups = Number(tourDraft.groups), koSize = Number(tourDraft.koSize);
+    const err = tourCheck(n, groups, koSize);
+    let info = err;
+    if (!err) {
+      const sizes = Array.from({ length: groups }, (_, g) => Math.floor(n / groups) + (g < n % groups ? 1 : 0));
+      const matches = sizes.reduce((s, x) => s + x * (x - 1) / 2, 0);
+      const rounds = Math.max(...sizes.map(x => (x % 2 ? x : x - 1)));
+      const shape = [...new Set(sizes)].sort().reverse().join(' ou ');
+      info = `${n} équipes : ${groups} poule${groups > 1 ? 's' : ''} de ${shape} · ${matches} matchs de poule en ${rounds} tour${rounds > 1 ? 's' : ''}
+        · ${koSize / groups} qualifiée${koSize / groups > 1 ? 's' : ''} par poule → ${KO_NAMES[koSize].toLowerCase()}${koSize > 2 ? 's' : ''}.`;
+    }
+    const pending = eventGames(ev).some(isPending);
+    const opts = [2, 4, 8, 16, 32].map(k => `<option value="${k}" ${koSize === k ? 'selected' : ''}>À partir des ${KO_NAMES[k].toLowerCase()}${k > 2 ? 's' : ''} (${k} équipes)</option>`).join('');
+    return `<div class="card"><details ${tourDraft.open ? 'open' : ''} ontoggle="tourDraft.open=this.open">
+      <summary>Tournoi : poules puis phase finale</summary>
+      <p class="muted">Les poules sont tirées au sort ; chaque équipe rencontre toutes les autres équipes de sa poule.
+      Les meilleures de chaque poule passent en phase finale, croisées avec les autres poules. Pas d'égalité en phase finale.</p>
+      <div class="row"><label class="fit" for="tgroups">Nombre de poules</label>
+        <input id="tgroups" type="number" inputmode="numeric" min="1" max="16" value="${esc(tourDraft.groups)}"
+          onchange="tourDraft.groups=this.value;render()" style="max-width:90px"></div>
+      <div style="margin-top:8px"><select aria-label="Phase finale" onchange="tourDraft.koSize=this.value;render()">${opts}</select></div>
+      <p class="${err ? 'err' : 'muted'}">${esc(info)}</p>
+      ${pending ? '<p class="err">Terminez ou annulez les matchs en cours avant de lancer le tournoi.</p>' : ''}
+      <button class="btn" onclick="launchTournament()" ${err || pending ? 'disabled' : ''}>Lancer le tournoi</button>
+    </details></div>`;
+  }
+  const games = eventGames(ev);
+  const group = games.filter(g => g.stage === 'group');
+  const groupLeft = group.filter(isPending).length;
+  const ko = games.filter(g => g.stage === 'ko');
+  const final = ko.find(g => g.ko === 2 && !isPending(g));
+  if (final) {
+    const champ = teamOf(final.sa > final.sb ? final.teamA : final.teamB);
+    return `<div class="card champion">🏆 Vainqueur : <b>${esc(champ.name)}</b> ${teamPlayers(champ, x => `<span class="muted">(${x})</span>`)}
+      <p style="margin-bottom:0"><button class="btn" onclick="closeEvent('${ev.id}')">Clore l'événement</button></p></div>`;
+  }
+  if (!ko.length && !groupLeft) {
+    const perGroup = ev.koSize / ev.groups;
+    const qualified = Array.from({ length: ev.groups }, (_, g) =>
+      `<b>${groupName(g)}</b> : ${groupStandings(ev, g).slice(0, perGroup).map(t => esc(t.name)).join(', ')}`).join('<br>');
+    return `<div class="card"><h2>Poules terminées</h2><p>${qualified}</p>
+      <button class="btn" onclick="launchFinal()">Lancer la phase finale (${KO_NAMES[ev.koSize].toLowerCase()}${ev.koSize > 2 ? 's' : ''})</button>
+      <p style="margin-bottom:0">${reset}</p></div>`;
+  }
+  const status = ko.length ? `Phase finale en cours : ${KO_NAMES[Math.min(...ko.filter(isPending).map(g => g.ko))]?.toLowerCase() ?? ''}.`
+    : `Phase de poules : ${group.length - groupLeft} match${group.length - groupLeft > 1 ? 's' : ''} joué${group.length - groupLeft > 1 ? 's' : ''} sur ${group.length}.`;
+  return `<div class="card"><h2>Tournoi</h2><p class="muted">${status} Classements dans l'onglet « Classement ».</p>${reset}</div>`;
+}
+
+function addTeam() {
+  const { p1, p2, name } = teamDraft;
+  if (!p1 || !p2 || p1 === p2) return alert('Choisissez deux joueurs différents.');
+  act(async () => {
+    await api('POST', `events/${currentEvent().id}/teams`, { players:[p1, p2], name:name.trim() });
+    teamDraft = { p1:'', p2:'', name:'' };
+  });
+}
+function renameTeam(id) {
+  const t = teamOf(id);
+  const v = t && prompt("Nouveau nom de l'équipe :", t.name);
+  if (v && v.trim() && v.trim() !== t.name) act(() => api('PATCH', 'teams/' + id, { name:v.trim() }));
+}
+function removeTeam(id) {
+  const t = teamOf(id);
+  if (t && confirm(`Retirer l'équipe « ${t.name} » ?`)) act(() => api('DELETE', 'teams/' + id));
+}
+function addTeamGame() {
+  if (!draft.ta || !draft.tb) return setErr('Choisissez les deux équipes.');
+  const scores = checkScores(draft.sa, draft.sb);
+  if (typeof scores === 'string') return setErr(scores);
+  draft.err = '';
+  act(async () => {
+    await api('POST', 'games', { eventId:currentEvent().id, teamA:draft.ta, teamB:draft.tb, ...scores });
+    draft = { a1:'', a2:'', b1:'', b2:'', ta:'', tb:'', sa:'', sb:'', err:'' };
+    if (scores) tab = 'classement';
+  });
+}
+function launchTournament() {
+  act(async () => {
+    await api('POST', `events/${currentEvent().id}/tournament`, { groups:Number(tourDraft.groups), koSize:Number(tourDraft.koSize) });
+    tourDraft.open = false;
+  });
+}
+function launchFinal() { act(() => api('POST', `events/${currentEvent().id}/tournament/final`)); }
+function resetTournament() {
+  if (!confirm('Réinitialiser le tournoi ? Tous ses matchs (joués ou non) et le tirage des poules seront supprimés. Les équipes restent.')) return;
+  act(() => api('DELETE', `events/${currentEvent().id}/tournament`));
+}
+function closeEvent(id) {
+  const ev = state.events.find(e => e.id === id);
+  if (ev && confirm(`Clore « ${ev.name} » ? Il passera en consultation seule (il pourra être rouvert).`))
+    act(() => api('PATCH', 'events/' + id, { closed:true }));
+}
+function reopenEvent(id) { act(() => api('PATCH', 'events/' + id, { closed:false })); }
 
 // Tours planifiés suivants, en aperçu
 function viewUpcoming(ev, round) {
@@ -314,9 +566,9 @@ function viewUpcoming(ev, round) {
     const rest = restsOf(ev, r);
     return `<p style="margin:10px 0 2px"><b>Tour ${r}</b>${rest.length ? ` <span class="muted">· repos : ${esc(rest.join(', '))}</span>` : ''}</p>`
       + later.filter(g => g.round === r).sort((x, y) => x.table - y.table).map(g =>
-        `<div class="game"><span>${teamNames(g.a)} <span class="muted">contre</span> ${teamNames(g.b)}</span><span class="tag">Table ${g.table}</span></div>`).join('');
+        `<div class="game"><span>${side(g, 'a')} <span class="muted">contre</span> ${side(g, 'b')}</span><span class="tag">${g.stage === 'group' ? groupName(g.grp) + ' · ' : ''}Table ${g.table}</span></div>`).join('');
   }).join('')}
-  <button class="ghost" style="margin-top:8px;padding-left:0" onclick="deletePlan()">Supprimer les tours non joués</button></div>`;
+  ${later.some(g => g.stage) ? '' : `<button class="ghost" style="margin-top:8px;padding-left:0" onclick="deletePlan()">Supprimer les tours non joués</button>`}</div>`;
 }
 
 function viewPlanner(ev) {
@@ -398,7 +650,9 @@ function setScoreDraft(id, k, v) {
 }
 function finishGame(id) {
   const d = scoreDraft[id] ?? {};
-  const scores = checkScores(d.sa ?? '', d.sb ?? '');
+  let scores = checkScores(d.sa ?? '', d.sb ?? '');
+  if (scores && typeof scores !== 'string' && state.games.find(g => g.id === id)?.stage === 'ko' && scores.sa === scores.sb)
+    scores = "Pas d'égalité en phase finale : il faut un vainqueur.";
   if (!scores || typeof scores === 'string') {
     d.err = scores || 'Saisissez les deux scores.';
     scoreDraft[id] = d;
@@ -414,8 +668,8 @@ function fixRow(g) {
   const input = (k, team) => `<input type="number" inputmode="numeric" min="0" step="10" aria-label="Points ${team}"
     value="${f[k]}" oninput="fix['${g.id}'].${k}=this.value" onchange="fix['${g.id}'].${k}=this.value=r10(this.value)">`;
   return `<div class="game" style="display:block">
-    <div class="side"><span>${teamNames(g.a)}</span>${input('sa', 'équipe A')}</div>
-    <div class="side"><span>${teamNames(g.b)}</span>${input('sb', 'équipe B')}</div>
+    <div class="side"><span>${side(g, 'a')}</span>${input('sa', 'équipe A')}</div>
+    <div class="side"><span>${side(g, 'b')}</span>${input('sb', 'équipe B')}</div>
     <div class="err">${esc(f.err ?? '')}</div>
     <div class="row"><button class="btn" onclick="saveFix('${g.id}')">Enregistrer la correction</button>
     <button class="link fit" onclick="delete fix['${g.id}'];render()">Annuler</button></div></div>`;
@@ -512,27 +766,37 @@ function viewEvents() {
   const cur = currentEvent();
   const list = eventsRecentFirst().map(e => {
     const n = finishedGames(e).length, todo = eventGames(e).length - n;
-    return `<div class="game"><div><b>${esc(e.name)}</b>${e.id === cur?.id ? ' <span class="win">✓</span>' : ''}<br>
+    const kind = e.groups ? 'Tournoi' : isTeamEvent(e) ? 'Équipes' : 'Individuel';
+    return `<div class="game"><div><b>${esc(e.name)}</b>${e.id === cur?.id ? ' <span class="win">✓</span>' : ''}
+      <span class="badge">${kind}</span>${isClosed(e) ? ' <span class="badge">🔒 Clos</span>' : ''}<br>
       <span class="muted" style="white-space:nowrap">${fmtDate(e.createdAt)} · ${n} partie${n > 1 ? 's' : ''}${todo ? ` · ${todo} à jouer` : ''}</span></div>
       <div class="actions">
         ${e.id === cur?.id ? '' : `<button class="link" onclick="openEvent('${e.id}')">Ouvrir</button>`}
         <button class="link" onclick="renameEvent('${e.id}')">Renommer</button>
+        ${isClosed(e) ? `<button class="link" onclick="reopenEvent('${e.id}')">Rouvrir</button>`
+          : `<button class="link" onclick="closeEvent('${e.id}')">Clore</button>`}
         <button class="ghost" onclick="delEvent('${e.id}')">Suppr.</button>
       </div></div>`;
   }).join('');
   return `<div class="card"><h2>Nouvel événement</h2>
-    <form class="row" onsubmit="addEvent(event)"><input id="ename" placeholder="Ex. Tournoi de Noël" aria-label="Nom de l'événement" maxlength="40" autocomplete="off">
-    <button class="btn fit">Créer</button></form></div>
+    <form onsubmit="addEvent(event)"><input id="ename" placeholder="Ex. Tournoi de Noël" aria-label="Nom de l'événement" maxlength="40" autocomplete="off">
+    <div class="row" style="margin-top:8px"><select id="emode" aria-label="Mode">
+      <option value="individual">Individuel</option>
+      <option value="team">Équipes fixes</option></select>
+    <button class="btn fit">Créer</button></div></form>
+    <p class="muted" style="margin-bottom:0">Individuel : les partenaires changent à chaque partie, classement par joueur.
+    Équipes fixes : paires inscrites au départ, classement par équipe, tournoi possible (poules puis phase finale).</p></div>
     <div class="card"><h2>Événements (${state.events.length})</h2>${list || '<span class="muted">Aucun événement.</span>'}</div>`;
 }
 function addEvent(e) {
   e.preventDefault();
   const v = document.getElementById('ename').value.trim();
   if (!v) return;
+  const mode = document.getElementById('emode').value;
   act(async () => {
-    const { created } = await api('POST', 'events', { name:v });
+    const { created } = await api('POST', 'events', { name:v, mode });
     pickEvent(created);
-    tab = 'classement';
+    tab = mode === 'team' ? 'partie' : 'classement';   // en équipes, on commence par former les paires
   });
 }
 function openEvent(id) { pickEvent(id); tab = 'classement'; render(); }

@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const planner = require('./planner');
+const tournament = require('./tournament');
 
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_SCORE = 100_000;
@@ -59,8 +60,32 @@ function openDb(dbPath) {
       db.exec('DROP TABLE games; ALTER TABLE games_new RENAME TO games; COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   }
-  else if (!cols.includes('round')) db.exec('ALTER TABLE games ADD COLUMN round INTEGER');
+  // Colonnes ajoutées au fil des versions (ALTER TABLE suffit : colonnes facultatives)
+  const addColumn = (table, col, def) => {
+    if (!db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(col))
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  };
+  addColumn('games', 'round', 'INTEGER');
+  addColumn('games', 'team_a', 'TEXT');   // équipes (événement en mode équipe)
+  addColumn('games', 'team_b', 'TEXT');
+  addColumn('games', 'stage', 'TEXT');    // 'group' (poule) ou 'ko' (phase finale), NULL hors tournoi
+  addColumn('games', 'grp', 'INTEGER');   // numéro de poule (0 = A)
+  addColumn('games', 'ko', 'INTEGER');    // phase finale : nombre d'équipes du tour (8 = quarts)
+  addColumn('games', 'slot', 'INTEGER');  // phase finale : position du match dans le tableau
+  addColumn('events', 'mode', "TEXT NOT NULL DEFAULT 'individual'");   // 'individual' ou 'team'
+  addColumn('events', 'closed_at', 'INTEGER');
+  addColumn('events', 'groups', 'INTEGER');    // tournoi : nombre de poules (NULL = pas de tournoi)
+  addColumn('events', 'ko_size', 'INTEGER');   // tournoi : équipes au premier tour de la phase finale
   db.exec(`
+  -- Équipes fixes d'un événement en mode équipe
+  CREATE TABLE IF NOT EXISTS teams (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    p1 TEXT NOT NULL REFERENCES players(id), p2 TEXT NOT NULL REFERENCES players(id),
+    grp INTEGER,
+    created_at INTEGER NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS games_event ON games(event_id);
   -- Joueurs au repos pour un tour planifié (nombre de joueurs non multiple de 4)
   CREATE TABLE IF NOT EXISTS rests (
@@ -132,18 +157,59 @@ function createApp(db) {
 
   // Les joueurs sont communs à tous les événements ; chaque partie appartient à un événement.
   function getState() {
-    const events = db.prepare('SELECT id, name, created_at AS createdAt FROM events ORDER BY created_at, rowid').all();
+    const events = db.prepare(`SELECT id, name, created_at AS createdAt, mode, closed_at AS closedAt,
+      groups, ko_size AS koSize FROM events ORDER BY created_at, rowid`).all();
     const players = db.prepare('SELECT id, name FROM players ORDER BY created_at, rowid').all();
     const games = db.prepare('SELECT * FROM games ORDER BY created_at, rowid').all()
       .map(g => ({ id: g.id, eventId: g.event_id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb,
-        table: g.table_no, round: g.round, finishedAt: g.finished_at }));
+        table: g.table_no, round: g.round, finishedAt: g.finished_at,
+        teamA: g.team_a, teamB: g.team_b, stage: g.stage, grp: g.grp, ko: g.ko, slot: g.slot }));
     const rests = db.prepare('SELECT event_id AS eventId, round, player_id AS playerId FROM rests ORDER BY round').all();
-    return { events, players, games, rests };
+    const teams = db.prepare(`SELECT id, event_id AS eventId, name, p1, p2, grp FROM teams ORDER BY created_at, rowid`).all()
+      .map(({ p1, p2, ...t }) => ({ ...t, players: [p1, p2] }));
+    return { events, players, games, rests, teams };
   }
 
   // Tour planifié en cours : le plus petit tour qui a encore des matchs sans score
   const currentRound = eventId =>
     db.prepare('SELECT MIN(round) AS r FROM games WHERE event_id = ? AND sa IS NULL AND round IS NOT NULL').get(eventId).r;
+
+  const getEvent = id => {
+    const ev = db.prepare('SELECT * FROM events WHERE id = ?').get(id);
+    if (!ev) throw new HttpError(404, 'Événement introuvable (supprimé depuis un autre appareil ?)');
+    return ev;
+  };
+  const assertOpen = ev => {
+    if (ev.closed_at) throw new HttpError(409, `L'événement « ${ev.name} » est clos : rouvrez-le pour le modifier.`);
+    return ev;
+  };
+  const gameOf = id => {
+    const g = db.prepare('SELECT * FROM games WHERE id = ?').get(id);
+    if (!g) throw new HttpError(404, 'Partie introuvable (supprimée depuis un autre appareil ?)');
+    return g;
+  };
+  const nextRound = eventId => (db.prepare('SELECT MAX(round) AS r FROM games WHERE event_id = ?').get(eventId).r ?? 0) + 1;
+  const insertGame = db.prepare(`INSERT INTO games (id, event_id, a1, a2, b1, b2, sa, sb, table_no, round, created_at,
+    finished_at, team_a, team_b, stage, grp, ko, slot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  // Match entre deux équipes fixes : les joueurs sont repris de l'équipe
+  const teamGame = (eventId, ta, tb, extra) => {
+    const t = id => db.prepare('SELECT p1, p2 FROM teams WHERE id = ?').get(id);
+    const [x, y] = [t(ta), t(tb)];
+    insertGame.run(uid(), eventId, x.p1, x.p2, y.p1, y.p2, extra.sa ?? null, extra.sb ?? null, extra.table ?? null,
+      extra.round ?? null, Date.now(), extra.sa != null ? Date.now() : null, ta, tb,
+      extra.stage ?? null, extra.grp ?? null, extra.ko ?? null, extra.slot ?? null);
+  };
+  const winnerOf = g => (g.sa > g.sb ? g.team_a : g.team_b);
+
+  // Phase finale : quand tous les matchs d'un tour sont joués, le tour suivant est créé
+  function advanceKnockout(eventId, ko) {
+    const games = db.prepare("SELECT * FROM games WHERE event_id = ? AND stage = 'ko' AND ko = ? ORDER BY slot").all(eventId, ko);
+    if (ko <= 2 || games.some(g => g.sa === null)) return;
+    if (db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko' AND ko = ?").get(eventId, ko / 2)) return;
+    const round = nextRound(eventId);
+    tournament.nextKnockoutRound(games.map(winnerOf)).forEach(([ta, tb], i) =>
+      teamGame(eventId, ta, tb, { table: i + 1, round, stage: 'ko', ko: ko / 2, slot: i }));
+  }
 
   const eventName = (body, exceptId = '') => {
     const name = cleanName(body.name);
@@ -158,14 +224,31 @@ function createApp(db) {
 
     'POST /api/events': ({ body }) => {
       const id = uid();
-      db.prepare('INSERT INTO events (id, name, created_at) VALUES (?, ?, ?)').run(id, eventName(body), Date.now());
+      const mode = body.mode ?? 'individual';
+      if (!['individual', 'team'].includes(mode)) throw new HttpError(400, 'Mode invalide');
+      db.prepare('INSERT INTO events (id, name, created_at, mode) VALUES (?, ?, ?, ?)').run(id, eventName(body), Date.now(), mode);
       return { ...getState(), created: id };
     },
 
+    // Renommer, changer de mode (tant que rien n'est joué), clore ou rouvrir
     'PATCH /api/events/:id': ({ params, body }) => {
-      const name = eventName(body, params.id);
-      if (!db.prepare('UPDATE events SET name = ? WHERE id = ?').run(name, params.id).changes)
-        throw new HttpError(404, 'Événement introuvable');
+      const ev = getEvent(params.id);
+      transaction(() => {
+        if (body.name !== undefined) db.prepare('UPDATE events SET name = ? WHERE id = ?').run(eventName(body, ev.id), ev.id);
+        if (body.mode !== undefined && body.mode !== ev.mode) {
+          assertOpen(ev);
+          if (!['individual', 'team'].includes(body.mode)) throw new HttpError(400, 'Mode invalide');
+          if (db.prepare('SELECT 1 FROM games WHERE event_id = ? UNION SELECT 1 FROM teams WHERE event_id = ?').get(ev.id, ev.id))
+            throw new HttpError(409, 'Le mode ne peut plus changer : cet événement a déjà des parties ou des équipes.');
+          db.prepare('UPDATE events SET mode = ? WHERE id = ?').run(body.mode, ev.id);
+        }
+        if (body.closed === true && !ev.closed_at) {
+          if (db.prepare('SELECT 1 FROM games WHERE event_id = ? AND sa IS NULL').get(ev.id))
+            throw new HttpError(409, 'Des matchs sont encore en cours ou planifiés : saisissez leurs scores ou supprimez-les avant de clore.');
+          db.prepare('UPDATE events SET closed_at = ? WHERE id = ?').run(Date.now(), ev.id);
+        }
+        if (body.closed === false) db.prepare('UPDATE events SET closed_at = NULL WHERE id = ?').run(ev.id);
+      });
       return getState();
     },
 
@@ -173,6 +256,7 @@ function createApp(db) {
       transaction(() => {
         db.prepare('DELETE FROM games WHERE event_id = ?').run(params.id);
         db.prepare('DELETE FROM rests WHERE event_id = ?').run(params.id);
+        db.prepare('DELETE FROM teams WHERE event_id = ?').run(params.id);
         db.prepare('DELETE FROM events WHERE id = ?').run(params.id);
       });
       return getState();
@@ -180,7 +264,8 @@ function createApp(db) {
 
     // Planification automatique de plusieurs tours, ajoutés après les tours existants
     'POST /api/events/:id/plan': ({ params, body }) => {
-      if (!db.prepare('SELECT 1 FROM events WHERE id = ?').get(params.id)) throw new HttpError(404, 'Événement introuvable');
+      const ev = assertOpen(getEvent(params.id));
+      if (ev.mode !== 'individual') throw new HttpError(400, 'La planification des partenaires concerne les événements en individuel.');
       const { players } = body;
       const rounds = Number(body.rounds);
       if (!Array.isArray(players) || !players.every(isId) || new Set(players).size !== players.length)
@@ -216,10 +301,123 @@ function createApp(db) {
 
     // Supprime les matchs planifiés pas encore joués (les parties terminées restent)
     'DELETE /api/events/:id/plan': ({ params }) => {
+      assertOpen(getEvent(params.id));
       transaction(() => {
-        db.prepare('DELETE FROM games WHERE event_id = ? AND sa IS NULL AND round IS NOT NULL').run(params.id);
+        db.prepare('DELETE FROM games WHERE event_id = ? AND sa IS NULL AND round IS NOT NULL AND stage IS NULL').run(params.id);
         db.prepare(`DELETE FROM rests WHERE event_id = ? AND round NOT IN
           (SELECT round FROM games WHERE event_id = ? AND round IS NOT NULL)`).run(params.id, params.id);
+      });
+      return getState();
+    },
+
+    'POST /api/events/:id/teams': ({ params, body }) => {
+      const ev = assertOpen(getEvent(params.id));
+      if (ev.mode !== 'team') throw new HttpError(400, "Cet événement n'est pas en mode équipe.");
+      if (ev.groups) throw new HttpError(409, 'Le tournoi est lancé : les équipes ne peuvent plus changer.');
+      const ids = body.players;
+      if (!Array.isArray(ids) || ids.length !== 2 || !ids.every(isId) || ids[0] === ids[1])
+        throw new HttpError(400, 'Choisissez 2 joueurs différents');
+      const names = ids.map(id => db.prepare('SELECT name FROM players WHERE id = ?').get(id)?.name);
+      if (names.includes(undefined)) throw new HttpError(400, 'Joueur inconnu (supprimé depuis un autre appareil ?)');
+      for (const [i, id] of ids.entries()) {
+        const other = db.prepare('SELECT name FROM teams WHERE event_id = ? AND ? IN (p1, p2)').get(ev.id, id);
+        if (other) throw new HttpError(409, `${names[i]} fait déjà partie de l'équipe « ${other.name} ».`);
+      }
+      const name = cleanName(body.name) || names.join(' & ');
+      if (db.prepare('SELECT 1 FROM teams WHERE event_id = ? AND name = ? COLLATE NOCASE').get(ev.id, name))
+        throw new HttpError(409, `L'équipe « ${name} » existe déjà.`);
+      db.prepare('INSERT INTO teams (id, event_id, name, p1, p2, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(uid(), ev.id, name, ...ids, Date.now());
+      return getState();
+    },
+
+    'PATCH /api/teams/:id': ({ params, body }) => {
+      const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(params.id);
+      if (!team) throw new HttpError(404, 'Équipe introuvable');
+      assertOpen(getEvent(team.event_id));
+      const name = cleanName(body.name);
+      if (!name) throw new HttpError(400, 'Nom requis');
+      if (db.prepare('SELECT 1 FROM teams WHERE event_id = ? AND name = ? COLLATE NOCASE AND id != ?').get(team.event_id, name, team.id))
+        throw new HttpError(409, `L'équipe « ${name} » existe déjà.`);
+      db.prepare('UPDATE teams SET name = ? WHERE id = ?').run(name, team.id);
+      return getState();
+    },
+
+    'DELETE /api/teams/:id': ({ params }) => {
+      const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(params.id);
+      if (!team) return getState();
+      const ev = assertOpen(getEvent(team.event_id));
+      if (ev.groups) throw new HttpError(409, 'Le tournoi est lancé : les équipes ne peuvent plus changer.');
+      if (db.prepare('SELECT 1 FROM games WHERE ? IN (team_a, team_b)').get(team.id))
+        throw new HttpError(409, "Cette équipe a des parties enregistrées : supprimez-les d'abord.");
+      db.prepare('DELETE FROM teams WHERE id = ?').run(team.id);
+      return getState();
+    },
+
+    // Lance le tournoi : tirage des poules et matchs de poule (chacun contre chacun), en tours
+    'POST /api/events/:id/tournament': ({ params, body }) => {
+      const ev = assertOpen(getEvent(params.id));
+      if (ev.mode !== 'team') throw new HttpError(400, 'Le tournoi se joue en mode équipe.');
+      if (ev.groups) throw new HttpError(409, 'Le tournoi est déjà lancé.');
+      if (db.prepare('SELECT 1 FROM games WHERE event_id = ? AND sa IS NULL').get(ev.id))
+        throw new HttpError(409, 'Terminez ou annulez les matchs en cours avant de lancer le tournoi.');
+      const teams = db.prepare('SELECT id FROM teams WHERE event_id = ? ORDER BY created_at, rowid').all(ev.id).map(t => t.id);
+      const groups = Number(body.groups), koSize = Number(body.koSize);
+      try { tournament.checkConfig(teams.length, groups, koSize); }
+      catch (e) { throw new HttpError(400, e.message); }
+
+      const drawn = tournament.drawGroups(teams, groups);
+      const schedules = drawn.map(tournament.roundRobin);
+      const first = nextRound(ev.id);
+      transaction(() => {
+        db.prepare('UPDATE events SET groups = ?, ko_size = ? WHERE id = ?').run(groups, koSize, ev.id);
+        drawn.forEach((ids, g) => ids.forEach(id => db.prepare('UPDATE teams SET grp = ? WHERE id = ?').run(g, id)));
+        const rounds = Math.max(...schedules.map(s => s.length));
+        const addRest = db.prepare('INSERT OR IGNORE INTO rests (event_id, round, player_id) VALUES (?, ?, ?)');
+        for (let r = 0; r < rounds; r++) {
+          let table = 0;
+          schedules.forEach((sched, g) => {
+            if (!sched[r]) return;
+            for (const [ta, tb] of sched[r].pairs) teamGame(ev.id, ta, tb, { table: ++table, round: first + r, stage: 'group', grp: g });
+            if (sched[r].bye) {
+              const t = db.prepare('SELECT p1, p2 FROM teams WHERE id = ?').get(sched[r].bye);
+              addRest.run(ev.id, first + r, t.p1); addRest.run(ev.id, first + r, t.p2);
+            }
+          });
+        }
+      });
+      return getState();
+    },
+
+    // Phase finale : les meilleures équipes de chaque poule, croisées entre poules
+    'POST /api/events/:id/tournament/final': ({ params }) => {
+      const ev = assertOpen(getEvent(params.id));
+      if (!ev.groups) throw new HttpError(409, "Le tournoi n'est pas lancé.");
+      if (db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko'").get(ev.id))
+        throw new HttpError(409, 'La phase finale a déjà commencé.');
+      if (db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'group' AND sa IS NULL").get(ev.id))
+        throw new HttpError(409, 'Tous les matchs de poule doivent être joués avant la phase finale.');
+      const perGroup = ev.ko_size / ev.groups;
+      const games = db.prepare("SELECT team_a AS ta, team_b AS tb, sa, sb FROM games WHERE event_id = ? AND stage = 'group'").all(ev.id);
+      const qualified = Array.from({ length: ev.groups }, (_, g) => {
+        const ids = db.prepare('SELECT id FROM teams WHERE event_id = ? AND grp = ? ORDER BY name').all(ev.id, g).map(t => t.id);
+        return tournament.standings(ids, games).slice(0, perGroup).map(t => t.id);
+      });
+      const round = nextRound(ev.id);
+      transaction(() => tournament.firstKnockoutRound(qualified).forEach(([ta, tb], i) =>
+        teamGame(ev.id, ta, tb, { table: i + 1, round, stage: 'ko', ko: ev.ko_size, slot: i })));
+      return getState();
+    },
+
+    // Réinitialise le tournoi : supprime ses matchs (joués ou non) et le tirage des poules
+    'DELETE /api/events/:id/tournament': ({ params }) => {
+      const ev = assertOpen(getEvent(params.id));
+      transaction(() => {
+        db.prepare('DELETE FROM games WHERE event_id = ? AND stage IS NOT NULL').run(ev.id);
+        db.prepare(`DELETE FROM rests WHERE event_id = ? AND round NOT IN
+          (SELECT round FROM games WHERE event_id = ? AND round IS NOT NULL)`).run(ev.id, ev.id);
+        db.prepare('UPDATE teams SET grp = NULL WHERE event_id = ?').run(ev.id);
+        db.prepare('UPDATE events SET groups = NULL, ko_size = NULL WHERE id = ?').run(ev.id);
       });
       return getState();
     },
@@ -236,6 +434,8 @@ function createApp(db) {
     'DELETE /api/players/:id': ({ params }) => {
       const used = db.prepare('SELECT 1 FROM games WHERE ? IN (a1, a2, b1, b2) LIMIT 1').get(params.id);
       if (used) throw new HttpError(409, "Ce joueur a des parties enregistrées dans un événement : supprimez-les d'abord.");
+      const team = db.prepare('SELECT name FROM teams WHERE ? IN (p1, p2)').get(params.id);
+      if (team) throw new HttpError(409, `Ce joueur fait partie de l'équipe « ${team.name} » : retirez-la d'abord.`);
       transaction(() => {
         db.prepare('DELETE FROM rests WHERE player_id = ?').run(params.id);
         db.prepare('DELETE FROM players WHERE id = ?').run(params.id);
@@ -244,9 +444,20 @@ function createApp(db) {
     },
 
     'POST /api/games': ({ body }) => {
-      const { a, b, eventId } = body;
+      const { eventId } = body;
+      let { a, b } = body;
       if (!isId(eventId) || !db.prepare('SELECT 1 FROM events WHERE id = ?').get(eventId))
         throw new HttpError(400, 'Événement introuvable (supprimé depuis un autre appareil ?)');
+      const ev = assertOpen(getEvent(eventId));
+      let teamIds = [null, null];
+      if (ev.mode === 'team') {
+        if (ev.groups) throw new HttpError(409, 'Pendant le tournoi, les matchs sont générés automatiquement.');
+        const team = id => isId(id) && db.prepare('SELECT * FROM teams WHERE id = ? AND event_id = ?').get(id, eventId);
+        const [ta, tb] = [team(body.teamA), team(body.teamB)];
+        if (!ta || !tb) throw new HttpError(400, 'Choisissez deux équipes de cet événement');
+        if (ta.id === tb.id) throw new HttpError(400, 'Choisissez deux équipes différentes');
+        [a, b, teamIds] = [[ta.p1, ta.p2], [tb.p1, tb.p2], [ta.id, tb.id]];
+      }
       if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 2 || b.length !== 2)
         throw new HttpError(400, 'Il faut 2 joueurs par équipe');
       const ids = [...a, ...b];
@@ -273,9 +484,8 @@ function createApp(db) {
           const used = new Set(pending.map(g => g.table_no));
           for (table = 1; used.has(table); table++);
         }
-        db.prepare(`INSERT INTO games (id, event_id, a1, a2, b1, b2, sa, sb, table_no, created_at, finished_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(uid(), eventId, ...ids, scores?.[0] ?? null, scores?.[1] ?? null, table, now, scores ? now : null);
+        insertGame.run(uid(), eventId, ...ids, scores?.[0] ?? null, scores?.[1] ?? null, table, null, now,
+          scores ? now : null, ...teamIds, null, null, null, null);
       });
       return getState();
     },
@@ -283,13 +493,16 @@ function createApp(db) {
     'PATCH /api/games/:id': ({ params, body }) => {
       const scores = parseScores(body);
       if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
-      const done = db.prepare('UPDATE games SET sa = ?, sb = ?, finished_at = ? WHERE id = ? AND sa IS NULL')
-        .run(...scores, Date.now(), params.id).changes;
-      if (!done) {
-        if (!db.prepare('SELECT 1 FROM games WHERE id = ?').get(params.id))
-          throw new HttpError(404, 'Match introuvable (annulé depuis un autre appareil ?)');
-        throw new HttpError(409, 'Le score de ce match a déjà été saisi (depuis un autre appareil ?)');
-      }
+      const g = db.prepare('SELECT * FROM games WHERE id = ?').get(params.id);
+      if (!g) throw new HttpError(404, 'Match introuvable (annulé depuis un autre appareil ?)');
+      assertOpen(getEvent(g.event_id));
+      if (g.stage === 'ko' && scores[0] === scores[1]) throw new HttpError(400, "Pas d'égalité en phase finale : il faut un vainqueur.");
+      transaction(() => {
+        const done = db.prepare('UPDATE games SET sa = ?, sb = ?, finished_at = ? WHERE id = ? AND sa IS NULL')
+          .run(...scores, Date.now(), g.id).changes;
+        if (!done) throw new HttpError(409, 'Le score de ce match a déjà été saisi (depuis un autre appareil ?)');
+        if (g.stage === 'ko') advanceKnockout(g.event_id, g.ko);
+      });
       return getState();
     },
 
@@ -298,9 +511,18 @@ function createApp(db) {
     'PUT /api/games/:id/score': ({ params, body }) => {
       const scores = parseScores(body);
       if (!scores) throw new HttpError(400, 'Saisissez les deux scores');
-      const g = db.prepare('SELECT sa, sb FROM games WHERE id = ?').get(params.id);
-      if (!g) throw new HttpError(404, 'Partie introuvable (supprimée depuis un autre appareil ?)');
+      const g = gameOf(params.id);
+      assertOpen(getEvent(g.event_id));
       if (g.sa === null) throw new HttpError(409, "Ce match n'est pas terminé : saisissez son score dans l'onglet Partie.");
+      // Tournoi : une correction ne doit pas contredire la suite déjà générée
+      if (g.stage === 'group' && db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko'").get(g.event_id))
+        throw new HttpError(409, 'La phase finale a commencé : les résultats des poules sont figés.');
+      if (g.stage === 'ko') {
+        if (scores[0] === scores[1]) throw new HttpError(400, "Pas d'égalité en phase finale : il faut un vainqueur.");
+        const nextExists = db.prepare("SELECT 1 FROM games WHERE event_id = ? AND stage = 'ko' AND ko = ?").get(g.event_id, g.ko / 2);
+        if (nextExists && (scores[0] > scores[1]) !== (g.sa > g.sb))
+          throw new HttpError(409, 'Le tour suivant est déjà lancé : cette correction changerait le vainqueur.');
+      }
       const from = body.from;
       if (!Array.isArray(from) || from[0] !== g.sa || from[1] !== g.sb)
         throw new HttpError(409, `Le score a été modifié entre-temps (${g.sa} – ${g.sb}) : vérifiez avant de corriger.`);
@@ -309,7 +531,11 @@ function createApp(db) {
     },
 
     'DELETE /api/games/:id': ({ params }) => {
-      db.prepare('DELETE FROM games WHERE id = ?').run(params.id);
+      const g = db.prepare('SELECT * FROM games WHERE id = ?').get(params.id);
+      if (!g) return getState();
+      assertOpen(getEvent(g.event_id));
+      if (g.stage) throw new HttpError(409, 'Les matchs du tournoi ne se suppriment pas un par un : réinitialisez le tournoi si besoin.');
+      db.prepare('DELETE FROM games WHERE id = ?').run(g.id);
       return getState();
     },
   };

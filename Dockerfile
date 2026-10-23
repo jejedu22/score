@@ -1,7 +1,7 @@
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 DB_PATH=/data/belote.db
-COPY package.json server.js planner.js ./
+COPY package.json server.js planner.js tournament.js ./
 COPY public ./public
 RUN mkdir /data && chown node:node /data
 USER node
