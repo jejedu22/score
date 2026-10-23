@@ -101,6 +101,25 @@
   .swatch { width:34px; height:34px; border-radius:50%; border:3px solid transparent; flex:0 0 auto !important; padding:0; }
   .swatch.on { border-color:var(--ink); }
   .settings { background:var(--bg); border-radius:12px; padding:10px; margin:6px 0 10px; }
+  /* Messages courts en bas d'écran (remplacent les fenêtres d'alerte) */
+  #toast { position:fixed; left:50%; bottom:20px; transform:translate(-50%, 20px); max-width:calc(100% - 32px); z-index:10;
+    background:var(--ink); color:var(--bg); padding:10px 16px; border-radius:12px; font-size:15px; box-shadow:0 4px 16px #0003;
+    opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; }
+  #toast.show { opacity:1; transform:translate(-50%, 0); }
+  #toast.error { background:var(--danger); color:#fff; }
+  h2.section { font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:18px 2px 8px; }
+  .card h2 button, .card h2 .ghost { font-size:15px; font-weight:400; }
+  .eventbar { display:flex; gap:8px; }
+  .eventbar select { flex:1; min-width:0; }
+  .iconbtn { flex:0 0 auto; width:46px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--ink); font-size:20px; }
+  .empty { text-align:center; padding:22px 14px; }
+  .empty p { color:var(--muted); margin:0 0 12px; }
+  .evrow { padding:10px 0; border-bottom:1px solid var(--line); }
+  .evrow:last-child { border:0; }
+  .evrow.current { border-left:4px solid var(--accent); padding-left:10px; margin-left:-14px; }
+  .evmain { display:block; width:100%; text-align:left; background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer; }
+  .evactions { display:flex; flex-wrap:wrap; gap:0 6px; margin:4px 0 0 -6px; }
+  .evactions button { font-size:14px; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
@@ -108,11 +127,12 @@
 <header>🃏 Score Belote <small id="status" role="status" style="color:var(--danger);font-size:13px"></small></header>
 <nav>
   <button data-tab="classement" class="on">Classement</button>
-  <button data-tab="partie">Partie</button>
+  <button data-tab="partie">Parties</button>
   <button data-tab="joueurs">Joueurs</button>
   <button data-tab="evenements">Événements</button>
 </nav>
 <main id="app"></main>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script src="coinche.js"></script>
 <script>
@@ -170,14 +190,30 @@ async function refresh(force) {
     setOnline(!r.headers.get('X-Offline'));
   } catch { setOnline(false); }
 }
-// Une seule écriture à la fois : évite les doublons sur double clic
+let toastTimer;
+function hideToast() { clearTimeout(toastTimer); document.getElementById('toast').className = ''; }
+function toast(message, error = false) {
+  const el = document.getElementById('toast');
+  el.textContent = message;
+  el.className = 'show' + (error ? ' error' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, error ? 5000 : 2500);
+}
+
+// Une seule écriture à la fois : évite les doublons sur double clic.
+// done : message affiché en cas de réussite (texte, ou fonction qui reçoit le résultat de fn)
 let busy = false;
-async function act(fn) {
+async function act(fn, done) {
   if (busy) return;
   busy = true;
   document.body.classList.add('busy');
-  try { await fn(); await refresh(true); }
-  catch (e) { alert(e.message); await refresh(true); render(); }   // erreur : afficher l'état réel
+  // Toujours redessiner : l'action a pu changer l'écran (onglet, brouillon) même si les données sont identiques
+  try {
+    const result = await fn();
+    await refresh(true); render();
+    const message = typeof done === 'function' ? done(result) : done;
+    if (message) toast(message);
+  } catch (e) { toast(e.message, true); await refresh(true); render(); }   // erreur : afficher l'état réel
   finally { busy = false; document.body.classList.remove('busy'); }
 }
 function setOnline(ok) { document.getElementById('status').textContent = ok ? '' : '⚠ hors ligne'; }
@@ -202,6 +238,7 @@ function pickEvent(id) {
   // Sélections propres à l'événement précédent
   pickExisting = new Set();
   planDraft.players = null;
+  hideToast();
   teamDraft = { p1:'', p2:'', name:'' };
   render();
 }
@@ -232,7 +269,7 @@ function restsOf(ev, round) {
 const KO_NAMES = { 32:'16e de finale', 16:'8e de finale', 8:'Quart de finale', 4:'Demi-finale', 2:'Finale' };
 const groupName = i => `Poule ${String.fromCharCode(65 + i)}`;
 function tableLabel(g) {
-  if (g.stage === 'ko') return g.ko > 2 ? `${KO_NAMES[g.ko]} · Match ${g.slot + 1}` : KO_NAMES[g.ko];
+  if (g.stage === 'ko') return g.ko > 2 ? `${KO_NAMES[g.ko]} ${g.slot + 1}` : KO_NAMES[g.ko];
   if (g.stage === 'group') return `${groupName(g.grp)} · Tour ${g.round} · Table ${g.table}`;
   return g.round ? `Tour ${g.round} · Table ${g.table}` : `Table ${g.table}`;
 }
@@ -309,9 +346,15 @@ function eventBar() {
   if (!ev) return '';
   const opts = eventsRecentFirst().map(e =>
     `<option value="${e.id}" ${e.id === ev.id ? 'selected' : ''}>${esc(e.name)} · ${fmtDate(e.createdAt)}${isClosed(e) ? ' · clos' : ''}</option>`).join('');
-  return `<div class="eventbar"><select onchange="pickEvent(this.value)" aria-label="Événement">${opts}</select></div>`;
+  return `<div class="eventbar"><select onchange="pickEvent(this.value)" aria-label="Événement">${opts}</select>
+    <button class="iconbtn" title="Paramètres de l'événement" aria-label="Paramètres de l'événement" onclick="openSettings('${ev.id}')">⚙</button></div>`;
 }
-const noEvent = () => `<div class="card muted">Créez d'abord un événement dans l'onglet « Événements ».</div>`;
+// Écran vide : explication et bouton vers l'étape suivante
+const emptyState = (text, label, action) => `<div class="card empty"><p>${text}</p>
+  ${label ? `<button class="btn" onclick="${action}">${label}</button>` : ''}</div>`;
+const goTab = t => `tab='${t}';playerView=null;render();window.scrollTo(0,0)`;
+const noEvent = () => emptyState('Aucun événement pour l\'instant. Commencez par en créer un : une soirée, un tournoi…',
+  'Créer un événement', goTab('evenements') + ";setTimeout(()=>document.getElementById('ename')?.focus())");
 
 // Score en direct d'une partie saisie donne par donne
 function liveScore(g) {
@@ -395,7 +438,8 @@ function viewRanking() {
     if (st.length) main += rankingTable(st, { title: 'Classement individuel', label: 'Joueur', onRow: 'showPlayer',
       note: 'Rang : victoires, puis points. Touchez un en-tête pour trier, un joueur pour voir ses parties.' });
   }
-  if (!games.length && !ev.groups) main += `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
+  if (!games.length && !ev.groups) main += emptyState('Aucune partie terminée dans cet événement pour l\'instant.',
+    isClosed(ev) ? '' : pending.length ? 'Voir les parties en cours' : 'Lancer une partie', goTab('partie'));
   const history = [...games].reverse().map(g => fix[g.id] ? fixRow(g) : `<div class="game">
       <div>${g.stage ? `<span class="muted" style="font-size:13px">${tableLabel(g)}</span><br>` : ''}
       <span class="${g.sa > g.sb ? 'win' : ''}">${side(g, 'a')} <b>${g.sa}</b></span><br>
@@ -404,7 +448,7 @@ function viewRanking() {
       ${gameDeals(g).length ? `<button class="link" style="padding:0" onclick="openSheet('${g.id}')">Feuille de points</button>` : ''}
       ${isClosed(ev) ? '' : `<div class="actions">
       <button class="link" onclick="startFix('${g.id}')">Corriger</button>
-      ${g.stage ? '' : `<button class="ghost" onclick="delGame('${g.id}')">Suppr.</button>`}</div>`}</div>`).join('');
+      ${g.stage ? '' : `<button class="ghost" onclick="delGame('${g.id}')">Supprimer</button>`}</div>`}</div>`).join('');
   return closedBanner(ev) + live + main
     + (games.length ? `<div class="card"><h2>Historique (${games.length})</h2>${history}</div>` : '');
 }
@@ -429,19 +473,19 @@ function viewGame() {
     au tour ${round} : ${esc(resting.join(', '))}</p>` : '';
   const note = finishedNote ? `<div class="card champion" style="font-size:16px">${finishedNote}
     <button class="link" style="padding:0 0 0 6px" onclick="finishedNote='';render()">OK</button></div>` : '';
-  const header = note + rulesNote(ev) + (pending.length ? `<h2>Matchs en cours (${pending.length})</h2>` : '') + restNote + matchCards(pending, ev);
+  const header = note + rulesNote(ev) + (pending.length ? `<h2 class="section">Parties en cours (${pending.length})</h2>` : '') + restNote + matchCards(pending, ev);
   if (isTeamEvent(ev)) return ev.groups
     ? header + viewUpcoming(ev, round) + viewTournament(ev) + viewTeams(ev)
     : viewTeams(ev) + header + teamMatchForm(ev, pending) + viewTournament(ev);   // d'abord former les équipes
   const roster = rosterPlayers(ev);
-  if (roster.length < 4) return header + `<div class="card muted">Il faut au moins 4 joueurs inscrits à cet événement
-    (onglet « Joueurs »).</div>`;
+  if (roster.length < 4) return header + emptyState(`Il faut au moins 4 joueurs inscrits pour jouer
+    (${roster.length ? `${roster.length} pour l'instant` : 'aucun pour l\'instant'}).`, 'Inscrire des joueurs', goTab('joueurs'));
   const atTable = {};
   for (const g of pending) for (const id of [...g.a, ...g.b]) atTable[id] = g.table;
   const free = roster.filter(p => !atTable[p.id]).length;
   const form = free < 4
-    ? `<div class="card muted">Moins de 4 joueurs libres : saisissez un score pour en libérer, ou ajoutez des joueurs.</div>`
-    : `<div class="card"><h2>Nouveau match</h2>
+    ? `<div class="card muted">Moins de 4 joueurs libres : terminez une partie pour en libérer, ou inscrivez d'autres joueurs.</div>`
+    : `<div class="card"><h2>Nouvelle partie</h2>
     <div class="grid2">
       <div class="team"><b>Équipe A</b>${select('a1','Joueur 1',atTable)}${select('a2','Joueur 2',atTable)}
         ${byDeals() ? '' : `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=this.value=r10(this.value)">`}</div>
@@ -459,7 +503,8 @@ function rulesNote(ev) {
   if (ev.entry !== 'deals') return '';
   const end = ev.endType === 'points' ? `partie en ${ev.endValue} points` : `partie en ${ev.endValue} donne${ev.endValue > 1 ? 's' : ''}`;
   return `<p class="muted">Donne par donne · ${end} · ${ev.count === 'points' ? 'enchère + points faits' : 'enchère seule'}
-    · ${ev.rounding ? 'arrondi à la dizaine' : 'sans arrondi'}</p>`;
+    · ${ev.rounding ? 'arrondi à la dizaine' : 'sans arrondi'}
+    ${isClosed(ev) ? '' : `· <button class="link" style="padding:0" onclick="openSettings('${ev.id}')">modifier</button>`}</p>`;
 }
 function matchCards(pending, ev) {
   if (ev?.entry === 'deals') return pending.map(g => dealCard(g, ev)).join('');
@@ -546,7 +591,7 @@ async function keepAwake() {
 function shareSheet(id) {
   const url = location.href.split('#')[0] + '#feuille/' + id;
   if (navigator.share) return navigator.share({ title:'Feuille de points', url }).catch(() => {});
-  navigator.clipboard?.writeText(url).then(() => alert('Lien de la feuille copié.'), () => prompt('Lien de la feuille :', url))
+  navigator.clipboard?.writeText(url).then(() => toast('Lien de la feuille copié.'), () => prompt('Lien de la feuille :', url))
     ?? prompt('Lien de la feuille :', url);
 }
 
@@ -622,13 +667,13 @@ function submitDeal(id) {
       const winner = done.sa === done.sb ? 'Égalité' : `Vainqueur : ${side(g, done.sa > done.sb ? "a" : "b")}`;
       finishedNote = `Partie terminée (${tableLabel(g)}) : ${side(g, 'a')} ${done.sa} – ${done.sb} ${side(g, 'b')}. ${winner}.`;
     }
-  });
+  }, 'Donne enregistrée');
 }
 function undoDeal(id) {
   const g = state.games.find(x => x.id === id);
   const last = gameDeals(g).at(-1);
   if (!last || !confirm(`Annuler la donne ${last.idx + 1} (${side(g, 'a')} +${last.pa}, ${side(g, 'b')} +${last.pb}) ?`.replace(/&amp;/g, '&'))) return;
-  act(() => api('DELETE', `games/${id}/deals/last`));
+  act(() => api('DELETE', `games/${id}/deals/last`), 'Dernière donne annulée');
 }
 
 // --- Mode équipe ---
@@ -668,7 +713,7 @@ function teamMatchForm(ev, pending) {
     }).join('')}</select>`;
   const score = (k, l) => byDeals() ? '' : `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points ${l}" aria-label="Points équipe ${l}"
     value="${draft[k]}" oninput="draft.${k}=this.value" onchange="draft.${k}=this.value=r10(this.value)">`;
-  return `<div class="card"><h2>Match libre</h2><div class="grid2">
+  return `<div class="card"><h2>Nouvelle partie</h2><div class="grid2">
     <div class="team">${pick('ta')}${score('sa', 'A')}</div><div class="team">${pick('tb')}${score('sb', 'B')}</div></div>
     <p class="muted">${scoreHelp()}</p>
     <div class="err">${esc(draft.err)}</div><button class="btn" onclick="addTeamGame()">Enregistrer</button></div>`;
@@ -696,7 +741,7 @@ function viewTournament(ev) {
       const matches = sizes.reduce((s, x) => s + x * (x - 1) / 2, 0);
       const rounds = Math.max(...sizes.map(x => (x % 2 ? x : x - 1)));
       const shape = [...new Set(sizes)].sort().reverse().join(' ou ');
-      info = `${n} équipes : ${groups} poule${groups > 1 ? 's' : ''} de ${shape} · ${matches} matchs de poule en ${rounds} tour${rounds > 1 ? 's' : ''}
+      info = `${n} équipes : ${groups} poule${groups > 1 ? 's' : ''} de ${shape} · ${matches} parties de poule en ${rounds} tour${rounds > 1 ? 's' : ''}
         · ${koSize / groups} qualifiée${koSize / groups > 1 ? 's' : ''} par poule → ${KO_NAMES[koSize].toLowerCase()}${koSize > 2 ? 's' : ''}.`;
     }
     const pending = eventGames(ev).some(isPending);
@@ -710,7 +755,7 @@ function viewTournament(ev) {
           onchange="tourDraft.groups=this.value;render()" style="max-width:90px"></div>
       <div style="margin-top:8px"><select aria-label="Phase finale" onchange="tourDraft.koSize=this.value;render()">${opts}</select></div>
       <p class="${err ? 'err' : 'muted'}">${esc(info)}</p>
-      ${pending ? '<p class="err">Terminez ou annulez les matchs en cours avant de lancer le tournoi.</p>' : ''}
+      ${pending ? '<p class="err">Terminez ou annulez les parties en cours avant de lancer le tournoi.</p>' : ''}
       <button class="btn" onclick="launchTournament()" ${err || pending ? 'disabled' : ''}>Lancer le tournoi</button>
     </details></div>`;
   }
@@ -733,28 +778,28 @@ function viewTournament(ev) {
       <p style="margin-bottom:0">${reset}</p></div>`;
   }
   const status = ko.length ? `Phase finale en cours : ${KO_NAMES[Math.min(...ko.filter(isPending).map(g => g.ko))]?.toLowerCase() ?? ''}.`
-    : `Phase de poules : ${group.length - groupLeft} match${group.length - groupLeft > 1 ? 's' : ''} joué${group.length - groupLeft > 1 ? 's' : ''} sur ${group.length}.`;
+    : `Phase de poules : ${group.length - groupLeft} partie${group.length - groupLeft > 1 ? 's' : ''} jouée${group.length - groupLeft > 1 ? 's' : ''} sur ${group.length}.`;
   return `<div class="card"><h2>Tournoi</h2><p class="muted">${status} Classements dans l'onglet « Classement ».</p>${reset}</div>`;
 }
 
 function addTeam() {
   const { p1, p2, name } = teamDraft;
   const players = [p1, p2].filter(Boolean);
-  if (!name.trim() && !players.length) return alert("Donnez un nom à l'équipe, ou choisissez ses joueurs.");
-  if (p1 && p1 === p2) return alert('Choisissez deux joueurs différents.');
+  if (!name.trim() && !players.length) return toast("Donnez un nom à l'équipe, ou choisissez ses joueurs.", true);
+  if (p1 && p1 === p2) return toast('Choisissez deux joueurs différents.', true);
   act(async () => {
     await api('POST', `events/${currentEvent().id}/teams`, { players, name:name.trim() });
     teamDraft = { p1:'', p2:'', name:'' };
-  });
+  }, 'Équipe ajoutée');
 }
 function renameTeam(id) {
   const t = teamOf(id);
   const v = t && prompt("Nouveau nom de l'équipe :", t.name);
-  if (v && v.trim() && v.trim() !== t.name) act(() => api('PATCH', 'teams/' + id, { name:v.trim() }));
+  if (v && v.trim() && v.trim() !== t.name) act(() => api('PATCH', 'teams/' + id, { name:v.trim() }), 'Équipe renommée');
 }
 function removeTeam(id) {
   const t = teamOf(id);
-  if (t && confirm(`Retirer l'équipe « ${t.name} » ?`)) act(() => api('DELETE', 'teams/' + id));
+  if (t && confirm(`Retirer l'équipe « ${t.name} » ?`)) act(() => api('DELETE', 'teams/' + id), 'Équipe retirée');
 }
 function addTeamGame() {
   if (!draft.ta || !draft.tb) return setErr('Choisissez les deux équipes.');
@@ -765,32 +810,32 @@ function addTeamGame() {
     await api('POST', 'games', { eventId:currentEvent().id, teamA:draft.ta, teamB:draft.tb, ...scores });
     draft = { a1:'', a2:'', b1:'', b2:'', ta:'', tb:'', sa:'', sb:'', err:'' };
     if (scores) tab = 'classement';
-  });
+  }, scores ? 'Partie enregistrée' : 'Partie lancée');
 }
 function launchTournament() {
   act(async () => {
     await api('POST', `events/${currentEvent().id}/tournament`, { groups:Number(tourDraft.groups), koSize:Number(tourDraft.koSize) });
     tourDraft.open = false;
-  });
+  }, 'Tournoi lancé : poules tirées au sort');
 }
-function launchFinal() { act(() => api('POST', `events/${currentEvent().id}/tournament/final`)); }
+function launchFinal() { act(() => api('POST', `events/${currentEvent().id}/tournament/final`), 'Phase finale lancée'); }
 function resetTournament() {
-  if (!confirm('Réinitialiser le tournoi ? Tous ses matchs (joués ou non) et le tirage des poules seront supprimés. Les équipes restent.')) return;
-  act(() => api('DELETE', `events/${currentEvent().id}/tournament`));
+  if (!confirm('Réinitialiser le tournoi ? Toutes ses parties (jouées ou non) et le tirage des poules seront supprimés. Les équipes restent.')) return;
+  act(() => api('DELETE', `events/${currentEvent().id}/tournament`), 'Tournoi réinitialisé');
 }
 function closeEvent(id) {
   const ev = state.events.find(e => e.id === id);
   if (ev && confirm(`Clore « ${ev.name} » ? Il passera en consultation seule (il pourra être rouvert).`))
-    act(() => api('PATCH', 'events/' + id, { closed:true }));
+    act(() => api('PATCH', 'events/' + id, { closed:true }), 'Événement clos');
 }
-function reopenEvent(id) { act(() => api('PATCH', 'events/' + id, { closed:false })); }
+function reopenEvent(id) { act(() => api('PATCH', 'events/' + id, { closed:false }), 'Événement rouvert'); }
 
 // Tours planifiés suivants, en aperçu
 function viewUpcoming(ev, round) {
   const later = eventGames(ev).filter(g => isPending(g) && g.round !== null && g.round > round);
   if (!later.length) return '';
   const rounds = [...new Set(later.map(g => g.round))].sort((x, y) => x - y);
-  return `<div class="card upcoming"><h2>À venir</h2>${rounds.map(r => {
+  return `<h2 class="section">À venir</h2><div class="card upcoming">${rounds.map(r => {
     const rest = restsOf(ev, r);
     return `<p style="margin:10px 0 2px"><b>Tour ${r}</b>${rest.length ? ` <span class="muted">· repos : ${esc(rest.join(', '))}</span>` : ''}</p>`
       + later.filter(g => g.round === r).sort((x, y) => x.table - y.table).map(g =>
@@ -818,7 +863,7 @@ function viewPlanner(ev) {
       <input id="prounds" type="number" inputmode="numeric" min="1" max="30" value="${esc(planDraft.rounds)}"
         oninput="planDraft.rounds=this.value" style="max-width:90px"></div>
     <p class="muted">${info}</p>
-    ${adhoc ? `<p class="err">Terminez ou annulez les matchs ajoutés à la main avant de planifier.</p>` : ''}
+    ${adhoc ? `<p class="err">Terminez ou annulez les parties ajoutées à la main avant de planifier.</p>` : ''}
     <button class="btn" onclick="makePlan()" ${n < 4 || adhoc ? 'disabled' : ''}>Générer le planning</button>
   </details>${planDraft.msg ? `<p class="ok" style="margin:8px 0 0">${esc(planDraft.msg)}</p>` : ''}</div>`;
 }
@@ -834,7 +879,7 @@ function makePlan() {
   const ev = currentEvent();
   const players = (planDraft.players ?? rosterIds(ev)).filter(id => rosterIds(ev).includes(id));
   const rounds = Number(planDraft.rounds);
-  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 30) return alert('Nombre de tours : entre 1 et 30.');
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 30) return toast('Nombre de tours : entre 1 et 30.', true);
   act(async () => {
     const { plan } = await api('POST', `events/${ev.id}/plan`, { players, rounds });
     const span = plan.from === plan.to ? `Tour ${plan.from} planifié` : `Tours ${plan.from} à ${plan.to} planifiés`;
@@ -846,7 +891,7 @@ function makePlan() {
 }
 function deletePlan() {
   if (!confirm('Supprimer les tours planifiés pas encore joués (y compris les tables du tour en cours sans score) ?')) return;
-  act(() => api('DELETE', `events/${currentEvent().id}/plan`));
+  act(() => api('DELETE', `events/${currentEvent().id}/plan`), 'Tours non joués supprimés');
 }
 
 // Arrondi à la dizaine si l'événement le demande (réglage « Arrondir les scores »)
@@ -856,8 +901,8 @@ const r10 = v => (v === '' || !rounding() ? v : String(Math.round(Number(v) / 10
 
 const byDeals = () => currentEvent()?.entry === 'deals';
 const scoreHelp = () => byDeals()
-  ? 'Le score se saisit donne par donne une fois le match lancé (laissez les scores vides).'
-  : 'Laissez les scores vides pour lancer le match et saisir le score total à la fin.'
+  ? 'Le score se saisit donne par donne, sur la feuille de points de la partie.'
+  : 'Laissez les scores vides pour lancer la partie et saisir le score total à la fin.'
     + (rounding() ? ' Les scores sont arrondis à la dizaine (ex. 1275 → 1280).' : '');
 
 // Scores valides arrondis, null si les deux sont vides (match en cours), ou message d'erreur
@@ -879,7 +924,7 @@ function addGame() {
     await api('POST', 'games', { eventId:currentEvent()?.id, a:[a1, a2], b:[b1, b2], ...scores });
     draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
     if (scores) tab = 'classement';   // match lancé : on reste ici pour préparer la table suivante
-  });
+  }, scores ? 'Partie enregistrée' : 'Partie lancée');
 }
 function setScoreDraft(id, k, v) {
   (scoreDraft[id] ??= {})[k] = v;
@@ -898,7 +943,7 @@ function finishGame(id) {
   act(async () => {
     await api('PATCH', 'games/' + id, scores);
     delete scoreDraft[id];
-  });
+  }, 'Score enregistré');
 }
 function fixRow(g) {
   const f = fix[g.id];
@@ -926,18 +971,18 @@ function saveFix(id) {
     try { await api('PUT', `games/${id}/score`, { ...scores, from:f.from }); }
     catch (e) { delete fix[id]; throw e; }   // score changé ailleurs : on réaffiche la valeur à jour
     delete fix[id];
-  });
+  }, 'Score corrigé');
 }
 function cancelGame(id) {
   const g = state.games.find(g => g.id === id);
-  if (!g || !confirm(`Annuler le match de la table ${g.table} (${g.a.map(name).join(' & ')} contre ${g.b.map(name).join(' & ')}) ?`)) return;
-  act(async () => { await api('DELETE', 'games/' + id); delete scoreDraft[id]; });
+  if (!g || !confirm(`Annuler la partie de la table ${g.table} (${g.a.map(name).join(' & ')} contre ${g.b.map(name).join(' & ')}) ?`)) return;
+  act(async () => { await api('DELETE', 'games/' + id); delete scoreDraft[id]; }, 'Partie annulée');
 }
 function setErr(m) { draft.err = m; render(); }
 function delGame(id) {
   const g = state.games.find(g => g.id === id);
   if (!g || !confirm(`Supprimer la partie ${g.a.map(name).join(' & ')} ${g.sa} – ${g.sb} ${g.b.map(name).join(' & ')} ?`)) return;
-  act(() => api('DELETE', 'games/' + id));
+  act(() => api('DELETE', 'games/' + id), 'Partie supprimée');
 }
 
 // Joueurs de l'événement affiché ; on peut reprendre des joueurs d'autres événements
@@ -956,9 +1001,15 @@ function viewPlayers() {
     const orphan = !state.roster.some(r => r.playerId === p.id) && !used(p.id);
     return `<div class="game"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" style="width:auto"
       ${pickExisting.has(p.id) ? 'checked' : ''} onchange="pickExisting[this.checked ? 'add' : 'delete']('${p.id}');render()">${esc(p.name)}</label>
-      ${orphan ? `<button class="ghost" onclick="delPlayer('${p.id}')">Suppr.</button>` : ''}</div>`;
+      ${orphan ? `<button class="ghost" onclick="delPlayer('${p.id}')">Supprimer</button>` : ''}</div>`;
   }).join('');
-  return `<div class="card"><h2>Ajouter un joueur</h2>
+  const step = newSetup === ev.id ? `<div class="card" style="border:2px solid var(--accent)">
+    <p class="muted" style="margin:0">Étape 2 sur 3</p><h2 style="margin-top:2px">Joueurs de « ${esc(ev.name)} »</h2>
+    <p class="muted" style="margin-top:-4px">Inscrivez les joueurs : nouveaux noms ou joueurs d'autres événements.
+    ${isTeamEvent(ev) ? 'En équipes, c\'est facultatif : un nom d\'équipe suffit.' : ''}</p>
+    <button class="btn" style="width:100%" onclick="newSetup=null;tab='partie';render();window.scrollTo(0,0)">
+      Continuer vers les ${isTeamEvent(ev) ? 'équipes et parties' : 'parties'} →</button></div>` : '';
+  return step + `<div class="card"><h2>Ajouter un joueur</h2>
     <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40"
       autocomplete="off" list="known-players">
     <datalist id="known-players">${others.map(p => `<option value="${esc(p.name)}">`).join('')}</datalist>
@@ -981,15 +1032,16 @@ function addPlayer(e) {
   e.preventDefault();
   const v = document.getElementById('pname').value.trim();
   if (!v) return;
-  act(() => api('POST', `events/${currentEvent().id}/players`, { name:v })).then(() => document.getElementById('pname')?.focus());
+  act(() => api('POST', `events/${currentEvent().id}/players`, { name:v }), `« ${v} » inscrit à l'événement`).then(() => document.getElementById('pname')?.focus());
 }
 function enrollPicked() {
   const ids = [...pickExisting];
-  act(async () => { await api('POST', `events/${currentEvent().id}/players`, { ids }); pickExisting = new Set(); });
+  act(async () => { await api('POST', `events/${currentEvent().id}/players`, { ids }); pickExisting = new Set(); },
+    `${ids.length} joueur${ids.length > 1 ? 's inscrits' : ' inscrit'} à l'événement`);
 }
-function unenroll(id) { act(() => api('DELETE', `events/${currentEvent().id}/players/${id}`)); }
+function unenroll(id) { act(() => api('DELETE', `events/${currentEvent().id}/players/${id}`), `« ${name(id)} » retiré de l'événement`); }
 function delPlayer(id) {
-  if (confirm(`Supprimer définitivement « ${name(id)} » ? (il n'est inscrit à aucun événement)`)) act(() => api('DELETE', 'players/' + id));
+  if (confirm(`Supprimer définitivement « ${name(id)} » ? (il n'est inscrit à aucun événement)`)) act(() => api('DELETE', 'players/' + id), 'Joueur supprimé');
 }
 function showPlayer(id) { playerView = id; render(); window.scrollTo(0, 0); }
 
@@ -1032,47 +1084,59 @@ function viewPlayer(id) {
     + (sections || `<div class="card muted">Aucune partie jouée pour l'instant.</div>`);
 }
 
+const MODE_HELP = {
+  individual: 'Les partenaires changent à chaque partie ; classement par joueur.',
+  team: 'Paires fixes inscrites au départ ; classement par équipe, tournoi possible (poules puis phase finale).',
+};
 function viewEvents() {
   const cur = currentEvent();
   const list = eventsRecentFirst().map(e => {
     const n = finishedGames(e).length, todo = eventGames(e).length - n;
     const kind = e.groups ? 'Tournoi' : isTeamEvent(e) ? 'Équipes' : 'Individuel';
-    return `<div class="game"><div><b>${esc(e.name)}</b>${e.id === cur?.id ? ' <span class="win">✓</span>' : ''}
-      <span class="badge">${kind}</span>${isClosed(e) ? ' <span class="badge">🔒 Clos</span>' : ''}<br>
-      <span class="muted" style="white-space:nowrap">${fmtDate(e.createdAt)} · ${n} partie${n > 1 ? 's' : ''}${todo ? ` · ${todo} à jouer` : ''}</span></div>
-      <div class="actions">
-        ${e.id === cur?.id ? '' : `<button class="link" onclick="openEvent('${e.id}')">Ouvrir</button>`}
-        <button class="link" onclick="toggleSettings('${e.id}')">Réglages</button>
+    const played = n ? `${n} partie${n > 1 ? 's' : ''} jouée${n > 1 ? 's' : ''}` : 'aucune partie jouée';
+    // Toucher l'événement l'ouvre ; les actions secondaires sont en dessous
+    return `<div class="evrow ${e.id === cur?.id ? 'current' : ''}">
+      <button class="evmain" onclick="openEvent('${e.id}')" aria-label="Ouvrir ${esc(e.name)}">
+        <b>${esc(e.name)}</b> <span class="badge">${kind}</span>${isClosed(e) ? ' <span class="badge">🔒 Clos</span>' : ''}
+        ${e.id === cur?.id ? ' <span class="badge" style="color:var(--accent);border-color:var(--accent)">affiché</span>' : ''}<br>
+        <span class="muted">${fmtDate(e.createdAt)} · ${played}${todo ? ` · ${todo} à jouer` : ''}</span></button>
+      <div class="evactions">
+        <button class="link" onclick="toggleSettings('${e.id}')">Paramètres</button>
         <button class="link" onclick="renameEvent('${e.id}')">Renommer</button>
         ${isClosed(e) ? `<button class="link" onclick="reopenEvent('${e.id}')">Rouvrir</button>`
           : `<button class="link" onclick="closeEvent('${e.id}')">Clore</button>`}
-        <button class="ghost" onclick="delEvent('${e.id}')">Suppr.</button>
-      </div></div>${settingsFor === e.id ? settingsPanel(e) : ''}`;
+        <button class="ghost" onclick="delEvent('${e.id}')">Supprimer</button>
+      </div>${settingsFor === e.id ? settingsPanel(e) : ''}</div>`;
   }).join('');
   return `<div class="card"><h2>Nouvel événement</h2>
     <form onsubmit="addEvent(event)"><input id="ename" placeholder="Ex. Tournoi de Noël" aria-label="Nom de l'événement" maxlength="40" autocomplete="off">
-    <div class="row" style="margin-top:8px"><select id="emode" aria-label="Mode">
+    <div class="row" style="margin-top:8px"><select id="emode" aria-label="Mode"
+      onchange="document.getElementById('emode-help').textContent=MODE_HELP[this.value]">
       <option value="individual">Individuel</option>
       <option value="team">Équipes fixes</option></select>
     <button class="btn fit">Créer</button></div></form>
-    <p class="muted" style="margin-bottom:0">Individuel : les partenaires changent à chaque partie, classement par joueur.
-    Équipes fixes : paires inscrites au départ, classement par équipe, tournoi possible (poules puis phase finale).</p></div>
+    <p class="muted" id="emode-help" style="margin-bottom:0">${MODE_HELP.individual}</p></div>
     <div class="card"><h2>Événements (${state.events.length})</h2>${list || '<span class="muted">Aucun événement.</span>'}</div>`;
 }
-// Réglages de partie d'un événement (un seul panneau ouvert à la fois)
+// Paramètres de partie d'un événement (un seul panneau ouvert à la fois)
 let settingsFor = null, settingsDraft = null;
+// Parcours de création d'un événement : 1. paramètres → 2. joueurs → 3. parties
+let newSetup = null;   // id de l'événement en cours de création (null hors parcours)
+const settingsOf = e => ({ entry:e.entry, endType:e.endType, endValue:String(e.endValue), count:e.count, rounding:e.rounding, theme:e.theme });
 function toggleSettings(id) {
-  const e = state.events.find(x => x.id === id);
   settingsFor = settingsFor === id ? null : id;
-  settingsDraft = e && { entry:e.entry, endType:e.endType, endValue:String(e.endValue), count:e.count, rounding:e.rounding, theme:e.theme };
+  settingsDraft = null;
+  newSetup = null;
   render();
 }
 function settingsPanel(e) {
-  const s = settingsDraft;
+  const s = settingsDraft ??= settingsOf(e);
+  const intro = newSetup === e.id ? `<p class="muted" style="margin:0">Étape 1 sur 3</p><h2 style="margin-top:2px">Paramètres de « ${esc(e.name)} »</h2>
+    <p class="muted" style="margin-top:-4px">Choisissez comment se jouent les parties. Tout reste modifiable plus tard (⚙ à côté du nom de l'événement).</p>` : '';
   const seg = (key, options) => `<div class="seg">${options.map(([v, label]) =>
     `<button type="button" class="${s[key] === v ? 'on' : ''}" onclick="settingsDraft.${key}=${JSON.stringify(v).replace(/"/g, "'")};${key === 'endType' ? `settingsDraft.endValue='${v === 'rounds' ? 8 : 1000}';` : ''}render()">${label}</button>`).join('')}</div>`;
   const locked = isClosed(e);
-  return `<div class="settings">
+  return `<div class="settings">${intro}
     ${locked ? '<p class="muted" style="margin-top:0">Événement clos : seules les couleurs sont modifiables.</p>' : ''}
     <div class="field"><span>Saisie des scores</span>${seg('entry', [['total', 'Score final'], ['deals', 'Donne par donne']])}</div>
     ${s.entry === 'deals' ? `
@@ -1089,7 +1153,8 @@ function settingsPanel(e) {
     <div class="field"><span>Couleurs</span><div class="row" style="justify-content:flex-start;gap:10px">${Object.entries(THEMES).map(([k, c]) =>
       `<button type="button" class="swatch ${s.theme === k ? 'on' : ''}" style="background:${c}" aria-label="${k}" title="${k}"
         onclick="settingsDraft.theme='${k}';render()"></button>`).join('')}</div></div>
-    <button class="btn" onclick="saveSettings('${e.id}')">Enregistrer</button></div>`;
+    <div class="row"><button class="btn" onclick="saveSettings('${e.id}')">${newSetup === e.id ? 'Enregistrer et continuer' : 'Enregistrer'}</button>
+    ${newSetup === e.id ? '' : `<button class="link fit" onclick="toggleSettings('${e.id}')">Fermer</button>`}</div></div>`;
 }
 function saveSettings(id) {
   const s = settingsDraft;
@@ -1099,7 +1164,8 @@ function saveSettings(id) {
   act(async () => {
     await api('PATCH', 'events/' + id, { settings:body });
     settingsFor = null;
-  });
+    if (newSetup === id) tab = 'joueurs';   // parcours de création : étape 2, les joueurs
+  }, 'Paramètres enregistrés');
 }
 
 function addEvent(e) {
@@ -1110,27 +1176,37 @@ function addEvent(e) {
   act(async () => {
     const { created } = await api('POST', 'events', { name:v, mode });
     pickEvent(created);
-    tab = mode === 'team' ? 'partie' : 'classement';   // en équipes, on commence par former les paires
-  });
+    // On arrive sur les paramètres du nouvel événement
+    tab = 'evenements';
+    [settingsFor, settingsDraft, newSetup] = [created, null, created];
+  }).then(() => document.querySelector('.settings')?.scrollIntoView({ block:'start' }));
 }
-function openEvent(id) { pickEvent(id); tab = 'classement'; render(); }
+function openEvent(id) { tab = 'partie'; pickEvent(id); window.scrollTo(0, 0); }
+// Paramètres de l'événement depuis n'importe quel onglet (bouton ⚙)
+function openSettings(id) {
+  [tab, playerView, settingsFor, settingsDraft, newSetup] = ['evenements', null, id, null, null];
+  render();
+  document.querySelector('.settings')?.scrollIntoView({ block:'start' });
+}
 function renameEvent(id) {
   const ev = state.events.find(e => e.id === id);
   const v = ev && prompt("Nouveau nom de l'événement :", ev.name);
-  if (v && v.trim() && v.trim() !== ev.name) act(() => api('PATCH', 'events/' + id, { name:v.trim() }));
+  if (v && v.trim() && v.trim() !== ev.name) act(() => api('PATCH', 'events/' + id, { name:v.trim() }), 'Événement renommé');
 }
 function delEvent(id) {
   const ev = state.events.find(e => e.id === id);
   const n = eventGames(ev).length;
   const what = n === 0 ? '' : n === 1 ? ' et sa partie' : ` et ses ${n} parties`;
   if (!ev || !confirm(`Supprimer « ${ev.name} »${what} ? Cette action est définitive.`)) return;
-  act(() => api('DELETE', 'events/' + id));
+  act(() => api('DELETE', 'events/' + id), 'Événement supprimé');
 }
 
 document.querySelector('nav').addEventListener('click', e => {
   if (!e.target.dataset.tab) return;
   tab = e.target.dataset.tab;
   playerView = null;
+  newSetup = null;   // naviguer par les onglets sort du parcours de création
+  hideToast();
   if (sheetView) { history.replaceState(null, '', location.pathname + location.search); sheetView = null; sheetFromApp = false; keepAwake(); }
   render();
 });
