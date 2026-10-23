@@ -30,7 +30,8 @@
   }
   * { box-sizing: border-box; }
   body { margin:0; font:16px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--ink); }
-  header { padding:14px 16px; font-size:20px; font-weight:700; }
+  header { padding:14px 16px; font-size:20px; font-weight:700; display:flex; align-items:center; gap:10px; }
+  header .logo { width:32px; height:32px; border-radius:8px; flex:0 0 auto; }
   nav { display:flex; gap:6px; padding:0 16px 8px; }
   nav button { flex:1; padding:10px 4px; font-size:15px !important; border:0; border-radius:10px; background:var(--card); color:var(--ink); font:inherit; font-weight:600; }
   nav button.on { background:var(--accent); color:#fff; }
@@ -128,7 +129,7 @@
 </style>
 </head>
 <body>
-<header>🃏 Score Belote <small id="status" role="status" style="color:var(--danger);font-size:13px"></small></header>
+<header><img class="logo" src="icons/icon.svg" alt="" width="32" height="32">Score Belote <small id="status" role="status" style="color:var(--danger);font-size:13px"></small></header>
 <nav>
   <button data-tab="classement" class="on">Classement</button>
   <button data-tab="partie">Parties</button>
