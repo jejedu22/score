@@ -1033,7 +1033,7 @@ function settingsPanel(e) {
     <div class="field"><span>Décompte d'une donne</span>${seg('count', [['contract', 'Enchère seule'], ['points', 'Enchère + points faits']])}</div>
     <p class="muted" style="margin:0">${s.count === 'points'
       ? 'Contrat réussi : le preneur marque contrat + ses points, la défense ses points (calculés automatiquement). Chute : la défense marque 160 + contrat.'
-      : 'Contrat réussi : le preneur marque le contrat. Chute : la défense marque 160 + contrat.'} Coinche ×2, surcoinche ×4 ; belote +20.</p>` : ''}
+      : 'Contrat réussi : le preneur marque le contrat. Chute : la défense marque le contrat.'} Coinche ×2, surcoinche ×4 ; belote +20.</p>` : ''}
     <label class="field" style="display:flex;gap:8px;align-items:center"><input type="checkbox" style="width:auto" ${s.rounding ? 'checked' : ''}
       onchange="settingsDraft.rounding=this.checked">Arrondir les scores à la dizaine</label>
     <div class="field"><span>Couleurs</span><div class="row" style="justify-content:flex-start;gap:10px">${Object.entries(THEMES).map(([k, c]) =>

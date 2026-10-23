@@ -32,7 +32,7 @@ planification) et peut être rouvert.
 et jeu de couleurs propre à l'événement. Les règles de décompte sont dans `public/coinche.js`,
 partagé par le navigateur (aperçu de la donne) et le serveur (calcul enregistré) :
 contrats 80 à 160 et capot (250), coinche ×2, surcoinche ×4, belote +20 ; chute : la défense
-marque 160 + contrat. Plusieurs téléphones peuvent suivre et saisir la même partie : une donne
+marque le contrat en « enchère seule », 160 + contrat en « enchère + points faits ». Plusieurs téléphones peuvent suivre et saisir la même partie : une donne
 saisie en double est refusée.
 
 Chaque partie a sa **feuille de points** sur un écran à part, à l'adresse `#feuille/<id>` : on peut

@@ -28,9 +28,12 @@ test('belote : +20 à l’équipe qui l’annonce, et compte pour atteindre le c
   assert.deepEqual(C.scoreDeal({ taker: 'a', contract: 100, points: 85, belote: 'b' }, points), { pa: 0, pb: 280, made: false });
 });
 
-test('enchère seule : le contrat (× coinche), rien pour la défense', () => {
+test('enchère seule : le contrat (× coinche) au preneur, ou à la défense s’il chute', () => {
   assert.deepEqual(C.scoreDeal({ taker: 'a', contract: 110, coinche: 2, made: true }, bid), { pa: 220, pb: 0, made: true });
-  assert.deepEqual(C.scoreDeal({ taker: 'b', contract: 110, made: false, belote: 'b' }, bid), { pa: 270, pb: 20, made: false });
+  // Chute : la défense marque seulement le contrat (pas 160 + contrat)
+  assert.deepEqual(C.scoreDeal({ taker: 'b', contract: 110, made: false, belote: 'b' }, bid), { pa: 110, pb: 20, made: false });
+  assert.deepEqual(C.scoreDeal({ taker: 'a', contract: 110, coinche: 4, made: false }, bid), { pa: 0, pb: 440, made: false });
+  assert.deepEqual(C.scoreDeal({ taker: 'a', contract: 250, made: false }, bid), { pa: 0, pb: 250, made: false });
 });
 
 test('capot : déclaré fait ou chuté, même en décompte des points', () => {

@@ -35,7 +35,8 @@
         score[defense] += d;
       }
     } else {
-      score[defense] = (settings.rounding ? 160 : 162) + contract * coinche;
+      // Chute : en enchère seule, la défense marque le contrat ; en points faits, 160 (ou 162) + le contrat
+      score[defense] = (settings.count === 'points' ? (settings.rounding ? 160 : 162) : 0) + contract * coinche;
     }
     return { pa: score.a + bonus('a'), pb: score.b + bonus('b'), made };
   }
