@@ -4,10 +4,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const planner = require('./planner');
 
 const PUBLIC = path.join(__dirname, 'public');
 const MAX_SCORE = 100_000;
 const MAX_NAME = 40;
+const MAX_ROUNDS = 30;
 
 const uid = () => crypto.randomBytes(5).toString('hex');
 const cleanName = v => String(v ?? '').trim().replace(/\s+/g, ' ').slice(0, MAX_NAME);
@@ -33,6 +35,7 @@ function openDb(dbPath) {
     b1 TEXT NOT NULL REFERENCES players(id), b2 TEXT NOT NULL REFERENCES players(id),
     -- Scores NULL = match en cours (équipes formées, score saisi à la fin)
     sa INTEGER, sb INTEGER, table_no INTEGER,
+    round INTEGER,   -- numéro de tour pour les parties planifiées, NULL pour un match ajouté à la main
     created_at INTEGER NOT NULL, finished_at INTEGER
   );`;
   const cols = db.prepare("SELECT name FROM pragma_table_info('games')").all().map(c => c.name);
@@ -56,7 +59,17 @@ function openDb(dbPath) {
       db.exec('DROP TABLE games; ALTER TABLE games_new RENAME TO games; COMMIT');
     } catch (e) { db.exec('ROLLBACK'); throw e; }
   }
-  db.exec('CREATE INDEX IF NOT EXISTS games_event ON games(event_id)');
+  else if (!cols.includes('round')) db.exec('ALTER TABLE games ADD COLUMN round INTEGER');
+  db.exec(`
+  CREATE INDEX IF NOT EXISTS games_event ON games(event_id);
+  -- Joueurs au repos pour un tour planifié (nombre de joueurs non multiple de 4)
+  CREATE TABLE IF NOT EXISTS rests (
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL,
+    player_id TEXT NOT NULL REFERENCES players(id),
+    PRIMARY KEY (event_id, round, player_id)
+  );
+  `);
   return db;
 }
 
@@ -123,9 +136,14 @@ function createApp(db) {
     const players = db.prepare('SELECT id, name FROM players ORDER BY created_at, rowid').all();
     const games = db.prepare('SELECT * FROM games ORDER BY created_at, rowid').all()
       .map(g => ({ id: g.id, eventId: g.event_id, a: [g.a1, g.a2], b: [g.b1, g.b2], sa: g.sa, sb: g.sb,
-        table: g.table_no, finishedAt: g.finished_at }));
-    return { events, players, games };
+        table: g.table_no, round: g.round, finishedAt: g.finished_at }));
+    const rests = db.prepare('SELECT event_id AS eventId, round, player_id AS playerId FROM rests ORDER BY round').all();
+    return { events, players, games, rests };
   }
+
+  // Tour planifié en cours : le plus petit tour qui a encore des matchs sans score
+  const currentRound = eventId =>
+    db.prepare('SELECT MIN(round) AS r FROM games WHERE event_id = ? AND sa IS NULL AND round IS NOT NULL').get(eventId).r;
 
   const eventName = (body, exceptId = '') => {
     const name = cleanName(body.name);
@@ -154,7 +172,54 @@ function createApp(db) {
     'DELETE /api/events/:id': ({ params }) => {
       transaction(() => {
         db.prepare('DELETE FROM games WHERE event_id = ?').run(params.id);
+        db.prepare('DELETE FROM rests WHERE event_id = ?').run(params.id);
         db.prepare('DELETE FROM events WHERE id = ?').run(params.id);
+      });
+      return getState();
+    },
+
+    // Planification automatique de plusieurs tours, ajoutés après les tours existants
+    'POST /api/events/:id/plan': ({ params, body }) => {
+      if (!db.prepare('SELECT 1 FROM events WHERE id = ?').get(params.id)) throw new HttpError(404, 'Événement introuvable');
+      const { players } = body;
+      const rounds = Number(body.rounds);
+      if (!Array.isArray(players) || !players.every(isId) || new Set(players).size !== players.length)
+        throw new HttpError(400, 'Liste de joueurs invalide');
+      if (players.length < 4) throw new HttpError(400, 'Il faut au moins 4 joueurs');
+      const known = db.prepare(`SELECT COUNT(*) AS n FROM players WHERE id IN (${players.map(() => '?').join()})`).get(...players).n;
+      if (known !== players.length) throw new HttpError(400, 'Joueur inconnu (supprimé depuis un autre appareil ?)');
+      if (!Number.isInteger(rounds) || rounds < 1 || rounds > MAX_ROUNDS)
+        throw new HttpError(400, `Nombre de tours invalide (entre 1 et ${MAX_ROUNDS})`);
+      if (db.prepare('SELECT 1 FROM games WHERE event_id = ? AND sa IS NULL AND round IS NULL').get(params.id))
+        throw new HttpError(409, 'Terminez ou annulez les matchs en cours avant de planifier des tours.');
+
+      // Tout ce qui a été joué ou prévu dans l'événement compte pour éviter les répétitions
+      const games = db.prepare('SELECT a1, a2, b1, b2 FROM games WHERE event_id = ?').all(params.id)
+        .map(g => [g.a1, g.a2, g.b1, g.b2]);
+      const rests = db.prepare('SELECT player_id FROM rests WHERE event_id = ?').all(params.id).map(r => r.player_id);
+      const result = planner.plan(players, rounds, { games, rests });
+
+      const first = (db.prepare('SELECT MAX(round) AS r FROM games WHERE event_id = ?').get(params.id).r ?? 0) + 1;
+      const now = Date.now();
+      transaction(() => {
+        const addGame = db.prepare(`INSERT INTO games (id, event_id, a1, a2, b1, b2, table_no, round, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        const addRest = db.prepare('INSERT INTO rests (event_id, round, player_id) VALUES (?, ?, ?)');
+        result.rounds.forEach(({ tables, rest }, i) => {
+          tables.forEach((t, j) => addGame.run(uid(), params.id, ...t, j + 1, first + i, now));
+          rest.forEach(id => addRest.run(params.id, first + i, id));
+        });
+      });
+      return { ...getState(), plan: { from: first, to: first + rounds - 1,
+        partnerRepeats: result.partnerRepeats, opponentRepeats: result.opponentRepeats } };
+    },
+
+    // Supprime les matchs planifiés pas encore joués (les parties terminées restent)
+    'DELETE /api/events/:id/plan': ({ params }) => {
+      transaction(() => {
+        db.prepare('DELETE FROM games WHERE event_id = ? AND sa IS NULL AND round IS NOT NULL').run(params.id);
+        db.prepare(`DELETE FROM rests WHERE event_id = ? AND round NOT IN
+          (SELECT round FROM games WHERE event_id = ? AND round IS NOT NULL)`).run(params.id, params.id);
       });
       return getState();
     },
@@ -171,7 +236,10 @@ function createApp(db) {
     'DELETE /api/players/:id': ({ params }) => {
       const used = db.prepare('SELECT 1 FROM games WHERE ? IN (a1, a2, b1, b2) LIMIT 1').get(params.id);
       if (used) throw new HttpError(409, "Ce joueur a des parties enregistrées dans un événement : supprimez-les d'abord.");
-      db.prepare('DELETE FROM players WHERE id = ?').run(params.id);
+      transaction(() => {
+        db.prepare('DELETE FROM rests WHERE player_id = ?').run(params.id);
+        db.prepare('DELETE FROM players WHERE id = ?').run(params.id);
+      });
       return getState();
     },
 
@@ -188,16 +256,18 @@ function createApp(db) {
       const scores = parseScores(body);
       const now = Date.now();
       transaction(() => {
-        // Un joueur ne peut pas être à deux tables à la fois
+        // Un joueur ne peut pas être à deux tables à la fois : matchs ajoutés à la main en cours
+        // et tables du tour planifié en cours (les tours suivants ne sont pas encore joués)
         const pending = db.prepare('SELECT * FROM games WHERE event_id = ? AND sa IS NULL').all(eventId);
-        for (const g of pending) {
+        const round = currentRound(eventId);
+        for (const g of pending.filter(g => g.round === null || g.round === round)) {
           const busy = ids.find(id => [g.a1, g.a2, g.b1, g.b2].includes(id));
           if (busy) {
             const who = db.prepare('SELECT name FROM players WHERE id = ?').get(busy).name;
-            throw new HttpError(409, `${who} joue déjà à la table ${g.table_no}.`);
+            throw new HttpError(409, `${who} joue déjà à la table ${g.table_no}${g.round ? ` (tour ${g.round})` : ''}.`);
           }
         }
-        // Match en cours : première table libre
+        // Match en cours : première table libre (sans reprendre un numéro de table d'un tour planifié)
         let table = null;
         if (!scores) {
           const used = new Set(pending.map(g => g.table_no));

@@ -8,6 +8,13 @@ automatiquement au démarrage : ses parties rejoignent un événement « Tournoi
 Plusieurs matchs peuvent se jouer en même temps : on forme les équipes à l'avance (scores vides),
 chaque match reçoit un numéro de table, et le score total est saisi à la fin depuis n'importe quel
 terminal. Un joueur ne peut pas être à deux tables, et un score ne peut être saisi qu'une fois.
+
+Les tours peuvent être **planifiés automatiquement** (onglet Partie → « Planifier des tours ») :
+on coche les joueurs présents et le nombre de tours, et `planner.js` répartit les tables en évitant
+d'abord qu'un joueur rejoue avec un même partenaire (parties déjà jouées dans l'événement comprises),
+puis de retrouver les mêmes adversaires. Si le nombre de joueurs n'est pas un multiple de 4, les
+joueurs en trop se reposent à tour de rôle. Le tour suivant devient actif quand tous les scores du
+tour en cours sont saisis.
 Les données sont stockées dans SQLite côté serveur ; les terminaux se synchronisent toutes les 5 s.
 
 ## PWA

@@ -126,6 +126,75 @@ test('correction : score validé modifiable, conflit détecté', async () => {
   assert.equal((await api.call('PUT', `/api/games/${t.id}/score`, { sa: 1, sb: 1, from: [null, null] })).status, 409);
 });
 
+test('planification : tours, repos, tour en cours, matchs à la main, suppression', async () => {
+  const api = await start();
+  const ids = await Promise.all(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'].map(n => api.addPlayer(n)));
+  const eventId = await api.addEvent('Tournoi');
+  const planFor = body => api.call('POST', `/api/events/${eventId}/plan`, body);
+
+  assert.equal((await planFor({ players: ids.slice(0, 3), rounds: 2 })).status, 400);
+  assert.equal((await planFor({ players: ids, rounds: 0 })).status, 400);
+  assert.equal((await planFor({ players: [...ids.slice(0, 4), 'ffffffffff'], rounds: 1 })).status, 400);
+
+  const { status, data } = await planFor({ players: ids, rounds: 3 });
+  assert.equal(status, 200);
+  assert.deepEqual([data.plan.from, data.plan.to, data.plan.partnerRepeats], [1, 3, 0]);
+  assert.equal(data.games.length, 6);                                    // 10 joueurs → 2 tables × 3 tours
+  assert.ok(data.games.every(g => g.sa === null && g.round >= 1 && [1, 2].includes(g.table)));
+  assert.equal(data.rests.length, 6);                                    // 2 au repos × 3 tours
+  for (const r of [1, 2, 3]) {
+    const inRound = [...data.games.filter(g => g.round === r).flatMap(g => [...g.a, ...g.b]),
+      ...data.rests.filter(x => x.round === r).map(x => x.playerId)];
+    assert.equal(new Set(inRound).size, 10);
+  }
+
+  // Le tour 1 est en cours : ses joueurs ne peuvent pas jouer ailleurs
+  const playing = data.games.find(g => g.round === 1).a;
+  const rest3 = ids.filter(id => id !== playing[0]).slice(0, 3);
+  const busy = await api.call('POST', '/api/games', { eventId, a: [playing[0], rest3[0]], b: rest3.slice(1) });
+  assert.equal(busy.status, 409);
+  assert.match(busy.data.error, /table \d \(tour 1\)/);
+  // Scores du tour 1 saisis : le tour 2 devient le tour en cours
+  for (const g of data.games.filter(g => g.round === 1))
+    await api.call('PATCH', `/api/games/${g.id}`, { sa: 1000, sb: 600 });
+  const inRound2 = data.games.find(g => g.round === 2).b[0];
+  const others = ids.filter(id => id !== inRound2).slice(0, 3);
+  const busy2 = await api.call('POST', '/api/games', { eventId, a: [inRound2, others[0]], b: others.slice(1) });
+  assert.equal(busy2.status, 409);
+  assert.match(busy2.data.error, /tour 2/);
+
+  // Un second planning s'ajoute après le tour 3 et évite les partenaires déjà vus
+  const more = await planFor({ players: ids, rounds: 2 });
+  assert.deepEqual([more.data.plan.from, more.data.plan.to], [4, 5]);
+  const pairs = more.data.games.flatMap(g => [g.a, g.b]).map(t => [...t].sort().join());
+  assert.equal(new Set(pairs).size, pairs.length);
+
+  // Supprimer le planning restant : seules les parties terminées (tour 1) et leurs repos restent
+  const { data: after } = await api.call('DELETE', `/api/events/${eventId}/plan`);
+  assert.ok(after.games.every(g => g.sa !== null && g.round === 1));
+  assert.deepEqual([...new Set(after.rests.map(r => r.round))], [1]);
+  // Un joueur qui s'est seulement reposé peut être supprimé
+  const onlyRested = ids.find(id => !after.games.some(g => [...g.a, ...g.b].includes(id)));
+  if (onlyRested) assert.equal((await api.call('DELETE', `/api/players/${onlyRested}`)).status, 200);
+});
+
+test('planification : matchs à la main à côté des tours planifiés', async () => {
+  const api = await start();
+  const ids = await Promise.all(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'].map(n => api.addPlayer(n)));
+  const eventId = await api.addEvent('Tournoi');
+  // 6 joueurs planifiés : 1 table + 2 au repos par tour ; les 4 autres jouent à la main
+  await api.call('POST', `/api/events/${eventId}/plan`, { players: ids.slice(0, 6), rounds: 2 });
+  const free = ids.slice(6);
+  const adhoc = await api.call('POST', '/api/games', { eventId, a: free.slice(0, 2), b: free.slice(2) });
+  assert.equal(adhoc.status, 200);
+  const g = adhoc.data.games.find(g => g.round === null);
+  assert.equal(g.table, 2);                    // la table 1 est celle des tours planifiés
+  // Pas de nouveau planning tant qu'un match à la main est en cours
+  assert.equal((await api.call('POST', `/api/events/${eventId}/plan`, { players: ids, rounds: 1 })).status, 409);
+  await api.call('PATCH', `/api/games/${g.id}`, { sa: 500, sb: 400 });
+  assert.equal((await api.call('POST', `/api/events/${eventId}/plan`, { players: ids, rounds: 1 })).data.plan.from, 3);
+});
+
 test('suppression : joueur avec parties protégé', async () => {
   const api = await start();
   const [a, b, c, d] = await fourPlayers(api);
@@ -178,7 +247,7 @@ test('migration : base avec événements mais sans matchs en cours', async () =>
   const { data } = await call('GET', '/api/state');
   assert.deepEqual(data.events.map(e => e.name), ['Noël']);
   assert.deepEqual(data.games, [{ id: '1111111111', eventId: 'eeeeeeeeee', a: ['aaaaaaaaaa', 'bbbbbbbbbb'],
-    b: ['cccccccccc', 'dddddddddd'], sa: 100, sb: 60, table: null, finishedAt: 7 }]);
+    b: ['cccccccccc', 'dddddddddd'], sa: 100, sb: 60, table: null, round: null, finishedAt: 7 }]);
   // Un match en cours peut être créé après migration
   assert.equal((await call('POST', '/api/games', { eventId: 'eeeeeeeeee', a: ['aaaaaaaaaa', 'bbbbbbbbbb'],
     b: ['cccccccccc', 'dddddddddd'] })).data.games[1].table, 1);
