@@ -176,7 +176,8 @@ async function act(fn) {
   if (busy) return;
   busy = true;
   document.body.classList.add('busy');
-  try { await fn(); await refresh(true); }
+  // Toujours redessiner : l'action a pu changer l'écran (onglet, brouillon) même si les données sont identiques
+  try { await fn(); await refresh(true); render(); }
   catch (e) { alert(e.message); await refresh(true); render(); }   // erreur : afficher l'état réel
   finally { busy = false; document.body.classList.remove('busy'); }
 }
@@ -958,7 +959,13 @@ function viewPlayers() {
       ${pickExisting.has(p.id) ? 'checked' : ''} onchange="pickExisting[this.checked ? 'add' : 'delete']('${p.id}');render()">${esc(p.name)}</label>
       ${orphan ? `<button class="ghost" onclick="delPlayer('${p.id}')">Suppr.</button>` : ''}</div>`;
   }).join('');
-  return `<div class="card"><h2>Ajouter un joueur</h2>
+  const step = newSetup === ev.id ? `<div class="card" style="border:2px solid var(--accent)">
+    <p class="muted" style="margin:0">Étape 2 sur 3</p><h2 style="margin-top:2px">Joueurs de « ${esc(ev.name)} »</h2>
+    <p class="muted" style="margin-top:-4px">Inscrivez les joueurs : nouveaux noms ou joueurs d'autres événements.
+    ${isTeamEvent(ev) ? 'En équipes, c\'est facultatif : un nom d\'équipe suffit.' : ''}</p>
+    <button class="btn" style="width:100%" onclick="newSetup=null;tab='partie';render();window.scrollTo(0,0)">
+      Continuer vers les ${isTeamEvent(ev) ? 'équipes et parties' : 'parties'} →</button></div>` : '';
+  return step + `<div class="card"><h2>Ajouter un joueur</h2>
     <form class="row" onsubmit="addPlayer(event)"><input id="pname" placeholder="Prénom" aria-label="Prénom" maxlength="40"
       autocomplete="off" list="known-players">
     <datalist id="known-players">${others.map(p => `<option value="${esc(p.name)}">`).join('')}</datalist>
@@ -1061,7 +1068,8 @@ function viewEvents() {
 }
 // Réglages de partie d'un événement (un seul panneau ouvert à la fois)
 let settingsFor = null, settingsDraft = null;
-let newSetup = null;   // événement qui vient d'être créé : on règle d'abord ses paramètres
+// Parcours de création d'un événement : 1. paramètres → 2. joueurs → 3. parties
+let newSetup = null;   // id de l'événement en cours de création (null hors parcours)
 const settingsOf = e => ({ entry:e.entry, endType:e.endType, endValue:String(e.endValue), count:e.count, rounding:e.rounding, theme:e.theme });
 function toggleSettings(id) {
   settingsFor = settingsFor === id ? null : id;
@@ -1071,7 +1079,7 @@ function toggleSettings(id) {
 }
 function settingsPanel(e) {
   const s = settingsDraft ??= settingsOf(e);
-  const intro = newSetup === e.id ? `<h2 style="margin-top:0">Paramètres de « ${esc(e.name)} »</h2>
+  const intro = newSetup === e.id ? `<p class="muted" style="margin:0">Étape 1 sur 3</p><h2 style="margin-top:2px">Paramètres de « ${esc(e.name)} »</h2>
     <p class="muted" style="margin-top:-4px">Choisissez comment se jouent les parties. Tout reste modifiable plus tard (bouton « Réglages »).</p>` : '';
   const seg = (key, options) => `<div class="seg">${options.map(([v, label]) =>
     `<button type="button" class="${s[key] === v ? 'on' : ''}" onclick="settingsDraft.${key}=${JSON.stringify(v).replace(/"/g, "'")};${key === 'endType' ? `settingsDraft.endValue='${v === 'rounds' ? 8 : 1000}';` : ''}render()">${label}</button>`).join('')}</div>`;
@@ -1104,8 +1112,7 @@ function saveSettings(id) {
   act(async () => {
     await api('PATCH', 'events/' + id, { settings:body });
     settingsFor = null;
-    // Nouvel événement : étape suivante, inscrire les joueurs (individuel) ou former les équipes
-    if (newSetup === id) { tab = e.mode === 'team' ? 'partie' : 'joueurs'; newSetup = null; }
+    if (newSetup === id) tab = 'joueurs';   // parcours de création : étape 2, les joueurs
   });
 }
 
@@ -1140,6 +1147,7 @@ document.querySelector('nav').addEventListener('click', e => {
   if (!e.target.dataset.tab) return;
   tab = e.target.dataset.tab;
   playerView = null;
+  newSetup = null;   // naviguer par les onglets sort du parcours de création
   if (sheetView) { history.replaceState(null, '', location.pathname + location.search); sheetView = null; sheetFromApp = false; keepAwake(); }
   render();
 });
