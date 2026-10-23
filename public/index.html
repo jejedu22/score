@@ -496,9 +496,9 @@ function viewGame() {
     : `<div class="card"><h2>Nouvelle partie</h2>
     <div class="grid2">
       <div class="team"><b>Équipe A</b>${select('a1','Joueur 1',atTable)}${select('a2','Joueur 2',atTable)}
-        ${byDeals() ? '' : `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=this.value=r10(this.value)">`}</div>
+        <input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points A" aria-label="Points équipe A" value="${draft.sa}" oninput="draft.sa=this.value" onchange="draft.sa=this.value=r10(this.value)"></div>
       <div class="team"><b>Équipe B</b>${select('b1','Joueur 1',atTable)}${select('b2','Joueur 2',atTable)}
-        ${byDeals() ? '' : `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=this.value=r10(this.value)">`}</div>
+        <input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points B" aria-label="Points équipe B" value="${draft.sb}" oninput="draft.sb=this.value" onchange="draft.sb=this.value=r10(this.value)"></div>
     </div>
     <p class="muted">${scoreHelp()}</p>
     <div class="err">${esc(draft.err)}</div>
@@ -514,17 +514,21 @@ function rulesNote(ev) {
     · ${ev.rounding ? 'arrondi à la dizaine' : 'sans arrondi'}
     ${isClosed(ev) ? '' : `· <button class="link" style="padding:0" onclick="openSettings('${ev.id}')">modifier</button>`}</p>`;
 }
-function matchCards(pending, ev) {
-  if (ev?.entry === 'deals') return pending.map(g => dealCard(g, ev)).join('');
-  const scoreInput = (g, k, team) => `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points"
+// Saisie directe du score final d'une partie (aussi possible en mode donne par donne)
+function totalScoreForm(g) {
+  const scoreInput = (k, team) => `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points"
     aria-label="Points ${team} ${tableLabel(g)}" value="${scoreDraft[g.id]?.[k] ?? ''}"
     oninput="setScoreDraft('${g.id}','${k}',this.value)" onchange="this.value=setScoreDraft('${g.id}','${k}',r10(this.value))">`;
+  return `<div class="side"><span>${side(g, 'a')}</span>${scoreInput('sa', 'équipe A')}</div>
+    <div class="side"><span>${side(g, 'b')}</span>${scoreInput('sb', 'équipe B')}</div>
+    <div class="err">${esc(scoreDraft[g.id]?.err ?? '')}</div>
+    <button class="btn" onclick="finishGame('${g.id}')">Valider le score final</button>`;
+}
+function matchCards(pending, ev) {
+  if (ev?.entry === 'deals') return pending.map(g => dealCard(g, ev)).join('');
   return pending.map(g => `<div class="card match"><h2><span>${tableLabel(g)}</span>
       ${g.stage ? '' : `<button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button>`}</h2>
-      <div class="side"><span>${side(g, 'a')}</span>${scoreInput(g, 'sa', 'équipe A')}</div>
-      <div class="side"><span>${side(g, 'b')}</span>${scoreInput(g, 'sb', 'équipe B')}</div>
-      <div class="err">${esc(scoreDraft[g.id]?.err ?? '')}</div>
-      <button class="btn" onclick="finishGame('${g.id}')">Valider le score</button></div>`).join('');
+      ${totalScoreForm(g)}</div>`).join('');
 }
 
 // --- Saisie donne par donne (belote coinchée) ---
@@ -542,8 +546,13 @@ function dealCard(g, ev) {
   return `<div class="card match"><h2><span>${tableLabel(g)}</span>
       ${g.stage ? '' : `<button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button>`}</h2>
     <div class="totals-live"><div>${side(g, 'a')}<b>${sa}</b></div><span class="muted">${deals.length} donne${deals.length > 1 ? 's' : ''}<br>${goal}</span><div>${side(g, 'b')}<b>${sb}</b></div></div>
-    <button class="btn" style="width:100%" onclick="openSheet('${g.id}')">Feuille de points</button></div>`;
+    <button class="btn" style="width:100%" onclick="openSheet('${g.id}')">Feuille de points</button>
+    ${totalOpen.has(g.id)
+      ? `<div style="margin-top:12px">${totalScoreForm(g)}
+        <button class="link fit" onclick="totalOpen.delete('${g.id}');render()">Fermer</button></div>`
+      : `<p style="margin:8px 0 0;text-align:center"><button class="link" onclick="totalOpen.add('${g.id}');render()">ou saisir directement le score final</button></p>`}</div>`;
 }
+let totalOpen = new Set();   // parties « donne par donne » dont on saisit plutôt le score final
 
 // Formulaire de la donne suivante (feuille de points)
 function dealForm(g, ev) {
@@ -628,7 +637,11 @@ function viewSheet(id) {
   const table = deals.length ? `<div class="card"><h2>Donnes</h2><table class="deals"><tr><th>#</th><th style="text-align:left">Preneur · contrat</th>
     <th>A</th><th>B</th></tr>${rows}</table><p class="muted" style="margin-bottom:0">En gris : total cumulé. A = ${side(g, 'a')}, B = ${side(g, 'b')}.</p></div>` : '';
   let action = '';
-  if (!finished && open) action = byDeal ? dealForm(g, ev) : matchCards([g], { entry:'total' });
+  if (!finished && open) action = byDeal
+    ? dealForm(g, ev) + `<div class="card"><details ${scoreDraft[g.id] ? 'open' : ''}><summary>Saisir directement le score final</summary>
+        <p class="muted">Si vous ne tenez pas la feuille donne par donne.${deals.length ? ' Les donnes déjà saisies restent visibles pour mémoire ; le score final les remplace.' : ''}</p>
+        ${totalScoreForm(g)}</details></div>`
+    : `<div class="card">${totalScoreForm(g)}</div>`;
   if (finished && open && deals.length) action = `<p><button class="link" style="padding:0" onclick="undoDeal('${g.id}')">Annuler la dernière donne (reprendre la partie)</button></p>`;
   return back + `<div class="card ${finished ? 'champion' : ''}">
       <p class="muted" style="margin:0 0 4px">${esc(ev.name)} · ${tableLabel(g)}</p>
@@ -719,7 +732,7 @@ function teamMatchForm(ev, pending) {
       const other = draft[k === 'ta' ? 'tb' : 'ta'];
       return `<option value="${t.id}" ${draft[k] === t.id ? 'selected' : ''} ${busy[t.id] || other === t.id ? 'disabled' : ''}>${esc(t.name)}${busy[t.id] ? ` (table ${busy[t.id]})` : ''}</option>`;
     }).join('')}</select>`;
-  const score = (k, l) => byDeals() ? '' : `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points ${l}" aria-label="Points équipe ${l}"
+  const score = (k, l) => `<input type="number" inputmode="numeric" min="0" step="${scoreStep()}" placeholder="Points ${l}" aria-label="Points équipe ${l}"
     value="${draft[k]}" oninput="draft.${k}=this.value" onchange="draft.${k}=this.value=r10(this.value)">`;
   return `<div class="card"><h2>Nouvelle partie</h2><div class="grid2">
     <div class="team">${pick('ta')}${score('sa', 'A')}</div><div class="team">${pick('tb')}${score('sb', 'B')}</div></div>
@@ -908,9 +921,9 @@ const scoreStep = () => (rounding() ? 10 : 1);
 const r10 = v => (v === '' || !rounding() ? v : String(Math.round(Number(v) / 10) * 10));
 
 const byDeals = () => currentEvent()?.entry === 'deals';
-const scoreHelp = () => byDeals()
-  ? 'Le score se saisit donne par donne, sur la feuille de points de la partie.'
-  : 'Laissez les scores vides pour lancer la partie et saisir le score total à la fin.'
+const scoreHelp = () => (byDeals()
+  ? 'Laissez les scores vides pour suivre la partie donne par donne sur sa feuille de points, ou saisissez directement le score final.'
+  : 'Laissez les scores vides pour lancer la partie et saisir le score total à la fin.')
     + (rounding() ? ' Les scores sont arrondis à la dizaine (ex. 1275 → 1280).' : '');
 
 // Scores valides arrondis, null si les deux sont vides (match en cours), ou message d'erreur
@@ -951,6 +964,7 @@ function finishGame(id) {
   act(async () => {
     await api('PATCH', 'games/' + id, scores);
     delete scoreDraft[id];
+    totalOpen.delete(id);
   }, 'Score enregistré');
 }
 function fixRow(g) {
