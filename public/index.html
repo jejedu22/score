@@ -26,6 +26,7 @@
   h2 { margin:0 0 10px; font-size:17px; }
   input, select { font:inherit; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); width:100%; }
   button.btn { padding:10px 14px; border:0; border-radius:10px; background:var(--accent); color:#fff; font:inherit; font-weight:600; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
   button.ghost { background:transparent; color:var(--danger); border:0; font:inherit; padding:6px; }
   .row { display:flex; gap:8px; align-items:center; }
   .row > * { flex:1; }
@@ -61,6 +62,14 @@
   .res.n { color:var(--muted); border:1px solid var(--line); }
   .totals { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; text-align:center; }
   .totals b { display:block; font-size:22px; }
+  .players-pick { display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:4px 12px; margin:8px 0; }
+  .players-pick label { display:flex; align-items:center; gap:8px; padding:4px 0; }
+  .players-pick input { width:auto; }
+  details > summary { cursor:pointer; font-weight:700; font-size:17px; list-style:none; }
+  details > summary::before { content:'▸ '; color:var(--muted); }
+  details[open] > summary::before { content:'▾ '; }
+  .ok { color:var(--accent); font-size:14px; }
+  .upcoming .game { font-size:14px; }
   .err { color:var(--danger); font-size:14px; min-height:18px; }
 </style>
 </head>
@@ -75,7 +84,7 @@
 <main id="app"></main>
 
 <script>
-let state = { events:[], players:[], games:[] };
+let state = { events:[], players:[], games:[], rests:[] };
 const EVENT_KEY = 'belote-evenement';
 let eventId = (() => { try { return localStorage.getItem(EVENT_KEY) || ''; } catch { return ''; } })();
 let tab = 'classement';
@@ -104,6 +113,8 @@ let draft = { a1:'', a2:'', b1:'', b2:'', sa:'', sb:'', err:'' };
 let scoreDraft = {};
 // Corrections de parties validées en cours d'édition, par id : { sa, sb, from:[sa, sb], err }
 let fix = {};
+// Formulaire de planification : joueurs cochés (null = tous), nombre de tours, dernier résultat
+let planDraft = { players:null, rounds:'3', msg:'' };
 
 // URLs relatives : fonctionne derrière Traefik, même sous un préfixe (StripPrefix)
 async function api(method, url, body) {
@@ -157,7 +168,19 @@ function pickEvent(id) {
 const eventGames = ev => state.games.filter(g => g.eventId === ev?.id);
 const isPending = g => g.sa === null;
 const finishedGames = ev => eventGames(ev).filter(g => !isPending(g)).sort((x, y) => x.finishedAt - y.finishedAt);
-const pendingGames = ev => eventGames(ev).filter(isPending).sort((x, y) => x.table - y.table);
+// Tour planifié en cours : le plus petit tour qui a encore des matchs sans score
+function currentRound(ev) {
+  const rounds = eventGames(ev).filter(g => isPending(g) && g.round !== null).map(g => g.round);
+  return rounds.length ? Math.min(...rounds) : null;
+}
+// Matchs en cours : ceux ajoutés à la main et ceux du tour planifié en cours (pas les tours suivants)
+function pendingGames(ev) {
+  const round = currentRound(ev);
+  return eventGames(ev).filter(g => isPending(g) && (g.round === null || g.round === round))
+    .sort((x, y) => (x.round ?? Infinity) - (y.round ?? Infinity) || x.table - y.table);
+}
+const restsOf = (ev, round) => state.rests.filter(r => r.eventId === ev.id && r.round === round).map(r => name(r.playerId));
+const tableLabel = g => g.round ? `Tour ${g.round} · Table ${g.table}` : `Table ${g.table}`;
 const teamNames = ids => esc(ids.map(name).join(' & '));
 const fmtDate = t => new Date(t).toLocaleDateString('fr-FR', { day:'numeric', month:'short', year:'numeric' });
 
@@ -211,7 +234,7 @@ function viewRanking() {
   const st = stats(games);
   const pending = pendingGames(ev);
   const live = pending.length ? `<div class="card"><h2>En cours (${pending.length})</h2>${pending.map(g => `<div class="game">
-      <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">Table ${g.table}</span></div>`).join('')}</div>` : '';
+      <div>${teamNames(g.a)}<br>${teamNames(g.b)}</div><span class="tag">${tableLabel(g)}</span></div>`).join('')}</div>` : '';
   if (!st.length) return live + `<div class="card muted">Aucune partie terminée dans cet événement pour l'instant.</div>`;
   const { value } = SORTS[sort.key];
   const cmp = sort.key === 'name' ? (x, y) => byName(x, y) : (x, y) => value(x) - value(y);
@@ -256,14 +279,14 @@ function viewGame() {
   const scoreInput = (g, k, team) => `<input type="number" inputmode="numeric" min="0" step="10" placeholder="Points"
     aria-label="Points ${team} table ${g.table}" value="${scoreDraft[g.id]?.[k] ?? ''}"
     oninput="setScoreDraft('${g.id}','${k}',this.value)" onchange="this.value=setScoreDraft('${g.id}','${k}',r10(this.value))">`;
-  const matches = pending.map(g => `<div class="card match"><h2><span>Table ${g.table}</span>
+  const matches = pending.map(g => `<div class="card match"><h2><span>${tableLabel(g)}</span>
       <button class="ghost" onclick="cancelGame('${g.id}')">Annuler</button></h2>
       <div class="side"><span>${teamNames(g.a)}</span>${scoreInput(g, 'sa', 'équipe A')}</div>
       <div class="side"><span>${teamNames(g.b)}</span>${scoreInput(g, 'sb', 'équipe B')}</div>
       <div class="err">${esc(scoreDraft[g.id]?.err ?? '')}</div>
       <button class="btn" onclick="finishGame('${g.id}')">Valider le score</button></div>`).join('');
   const form = free < 4
-    ? `<div class="card muted">Tous les joueurs sont à une table : saisissez un score pour en libérer.</div>`
+    ? `<div class="card muted">Moins de 4 joueurs libres : saisissez un score pour en libérer, ou ajoutez des joueurs.</div>`
     : `<div class="card"><h2>Nouveau match</h2>
     <div class="grid2">
       <div class="team"><b>Équipe A</b>${select('a1','Joueur 1',atTable)}${select('a2','Joueur 2',atTable)}
@@ -275,7 +298,75 @@ function viewGame() {
     Les scores sont arrondis à la dizaine (ex. 1275 → 1280).</p>
     <div class="err">${esc(draft.err)}</div>
     <button class="btn" onclick="addGame()">Enregistrer</button></div>`;
-  return (pending.length ? `<h2>Matchs en cours (${pending.length})</h2>` : '') + matches + form;
+  const round = currentRound(ev);
+  const resting = round ? restsOf(ev, round) : [];
+  const restNote = resting.length ? `<p class="muted">Au repos au tour ${round} : ${esc(resting.join(', '))}</p>` : '';
+  return (pending.length ? `<h2>Matchs en cours (${pending.length})</h2>` : '') + restNote + matches
+    + viewUpcoming(ev, round) + viewPlanner(ev) + form;
+}
+
+// Tours planifiés suivants, en aperçu
+function viewUpcoming(ev, round) {
+  const later = eventGames(ev).filter(g => isPending(g) && g.round !== null && g.round > round);
+  if (!later.length) return '';
+  const rounds = [...new Set(later.map(g => g.round))].sort((x, y) => x - y);
+  return `<div class="card upcoming"><h2>À venir</h2>${rounds.map(r => {
+    const rest = restsOf(ev, r);
+    return `<p style="margin:10px 0 2px"><b>Tour ${r}</b>${rest.length ? ` <span class="muted">· repos : ${esc(rest.join(', '))}</span>` : ''}</p>`
+      + later.filter(g => g.round === r).sort((x, y) => x.table - y.table).map(g =>
+        `<div class="game"><span>${teamNames(g.a)} <span class="muted">contre</span> ${teamNames(g.b)}</span><span class="tag">Table ${g.table}</span></div>`).join('');
+  }).join('')}
+  <button class="ghost" style="margin-top:8px;padding-left:0" onclick="deletePlan()">Supprimer les tours non joués</button></div>`;
+}
+
+function viewPlanner(ev) {
+  const chosen = planDraft.players ?? state.players.map(p => p.id);
+  const n = chosen.length;
+  const adhoc = eventGames(ev).some(g => isPending(g) && g.round === null);
+  const info = n < 4 ? 'Cochez au moins 4 joueurs.'
+    : `${n} joueurs : ${Math.floor(n / 4)} table${n >= 8 ? 's' : ''} par tour${n % 4 ? `, ${n % 4} au repos à tour de rôle` : ''}.`;
+  const boxes = sortedPlayers().map(p => `<label><input type="checkbox" ${chosen.includes(p.id) ? 'checked' : ''}
+    onchange="togglePlanPlayer('${p.id}', this.checked)">${esc(p.name)}</label>`).join('');
+  return `<div class="card"><details ${planDraft.open ? 'open' : ''} ontoggle="planDraft.open=this.open">
+    <summary>Planifier des tours</summary>
+    <p class="muted">Les tables de chaque tour sont tirées automatiquement : personne ne rejoue avec un même partenaire
+    tant que c'est possible (parties déjà jouées dans l'événement comprises), et les adversaires varient au maximum.</p>
+    <div class="row"><span class="fit">Joueurs présents</span>
+      <span class="fit"><button class="link" onclick="planAll(true)">Tous</button><button class="link" onclick="planAll(false)">Aucun</button></span></div>
+    <div class="players-pick">${boxes}</div>
+    <div class="row"><label class="fit" for="prounds">Nombre de tours</label>
+      <input id="prounds" type="number" inputmode="numeric" min="1" max="30" value="${esc(planDraft.rounds)}"
+        oninput="planDraft.rounds=this.value" style="max-width:90px"></div>
+    <p class="muted">${info}</p>
+    ${adhoc ? `<p class="err">Terminez ou annulez les matchs ajoutés à la main avant de planifier.</p>` : ''}
+    <button class="btn" onclick="makePlan()" ${n < 4 || adhoc ? 'disabled' : ''}>Générer le planning</button>
+  </details>${planDraft.msg ? `<p class="ok" style="margin:8px 0 0">${esc(planDraft.msg)}</p>` : ''}</div>`;
+}
+function togglePlanPlayer(id, on) {
+  const cur = new Set(planDraft.players ?? state.players.map(p => p.id));
+  on ? cur.add(id) : cur.delete(id);
+  planDraft.players = [...cur];
+  planDraft.msg = '';
+  render();
+}
+function planAll(on) { planDraft.players = on ? null : []; planDraft.msg = ''; render(); }
+function makePlan() {
+  const ev = currentEvent();
+  const players = (planDraft.players ?? state.players.map(p => p.id)).filter(id => state.players.some(p => p.id === id));
+  const rounds = Number(planDraft.rounds);
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 30) return alert('Nombre de tours : entre 1 et 30.');
+  act(async () => {
+    const { plan } = await api('POST', `events/${ev.id}/plan`, { players, rounds });
+    const span = plan.from === plan.to ? `Tour ${plan.from} planifié` : `Tours ${plan.from} à ${plan.to} planifiés`;
+    planDraft.msg = `${span}. ` + (plan.partnerRepeats === 0
+      ? 'Aucun partenaire répété.'
+      : `${plan.partnerRepeats} association${plan.partnerRepeats > 1 ? 's' : ''} de partenaires répétée${plan.partnerRepeats > 1 ? 's' : ''} (le moins possible trouvé : trop de tours pour le nombre de joueurs).`);
+    planDraft.open = false;
+  });
+}
+function deletePlan() {
+  if (!confirm('Supprimer les tours planifiés pas encore joués (y compris les tables du tour en cours sans score) ?')) return;
+  act(() => api('DELETE', `events/${currentEvent().id}/plan`));
 }
 
 const r10 = v => v === '' ? '' : String(Math.round(Number(v) / 10) * 10);
@@ -396,7 +487,7 @@ function viewPlayer(id) {
       const [team, opp] = g.a.includes(id) ? [g.a, g.b] : [g.b, g.a];
       const partner = name(team.find(x => x !== id));
       const vs = `avec <b>${esc(partner)}</b> · contre ${teamNames(opp)}`;
-      if (isPending(g)) return `<div class="game"><div>${vs}</div><span class="tag">Table ${g.table}</span></div>`;
+      if (isPending(g)) return `<div class="game"><div>${vs}</div><span class="tag">${tableLabel(g)}</span></div>`;
       const [mineScore, oppScore] = g.a.includes(id) ? [g.sa, g.sb] : [g.sb, g.sa];
       const res = mineScore > oppScore ? ['v', 'Victoire'] : mineScore < oppScore ? ['d', 'Défaite'] : ['n', 'Égalité'];
       return `<div class="game"><div>${vs}<br><b>${mineScore}</b> – ${oppScore}</div>
@@ -420,9 +511,9 @@ function viewPlayer(id) {
 function viewEvents() {
   const cur = currentEvent();
   const list = eventsRecentFirst().map(e => {
-    const n = eventGames(e).length;
+    const n = finishedGames(e).length, todo = eventGames(e).length - n;
     return `<div class="game"><div><b>${esc(e.name)}</b>${e.id === cur?.id ? ' <span class="win">✓</span>' : ''}<br>
-      <span class="muted" style="white-space:nowrap">${fmtDate(e.createdAt)} · ${n} partie${n > 1 ? 's' : ''}</span></div>
+      <span class="muted" style="white-space:nowrap">${fmtDate(e.createdAt)} · ${n} partie${n > 1 ? 's' : ''}${todo ? ` · ${todo} à jouer` : ''}</span></div>
       <div class="actions">
         ${e.id === cur?.id ? '' : `<button class="link" onclick="openEvent('${e.id}')">Ouvrir</button>`}
         <button class="link" onclick="renameEvent('${e.id}')">Renommer</button>
